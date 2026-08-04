@@ -6,38 +6,43 @@
  * Quickdash Admin > Settings > Storefronts
  */
 
-import { StorefrontClient } from './storefront-client'
+import { StorefrontClient } from './storefront-client';
 
-const storefrontApiKey = process.env.NEXT_PUBLIC_STOREFRONT_API_KEY
+const storefrontApiKey = process.env.NEXT_PUBLIC_QUICKDASH_SITE_KEY;
+const workspaceId = process.env.NEXT_PUBLIC_QUICKDASH_WORKSPACE_ID;
 
 if (!storefrontApiKey) {
-	throw new Error('Missing NEXT_PUBLIC_STOREFRONT_API_KEY')
+  throw new Error('Missing NEXT_PUBLIC_QUICKDASH_SITE_KEY');
+}
+if (!workspaceId) {
+  throw new Error('Missing NEXT_PUBLIC_QUICKDASH_WORKSPACE_ID');
 }
 
 // Create the store instance
 export const store = new StorefrontClient({
-	apiKey: storefrontApiKey,
-	baseUrl: process.env.NEXT_PUBLIC_STOREFRONT_URL || 'https://app.quickdash.net',
-})
+  apiKey: storefrontApiKey,
+  workspaceId,
+  baseUrl: process.env.NEXT_PUBLIC_QUICKDASH_API_URL || 'https://api.quickdash.xyz',
+});
 
 // Re-export types for convenience
 export type {
-	Product,
-	Category,
-	Auction,
-	Order,
-	Customer,
-	Address,
-	SiteSettings,
-	ShippingRate,
-	WishlistItem,
-	Review,
-	Discount,
-	FaqItem,
-	StatItem,
-	Testimonial,
-	SiteContentItem,
-} from './storefront-client'
+  Address,
+  Auction,
+  Category,
+  Customer,
+  Discount,
+  FaqItem,
+  Order,
+  Product,
+  Review,
+  ShippingRate,
+  SiteContentItem,
+  SiteSettings,
+  StatItem,
+  Testimonial,
+  WishlistItem,
+} from './storefront-client';
 
 // ============================================
 // Usage Examples (delete this section later)

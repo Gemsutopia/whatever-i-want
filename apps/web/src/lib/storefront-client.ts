@@ -1,3 +1,10 @@
+import {
+  createQuickConnect,
+  type QuickCatalogAvailability,
+  type QuickCatalogItem,
+  type QuickCatalogVariant,
+} from '@quickengine/quick/browser';
+
 /**
  * Storefront API Client
  *
@@ -11,6 +18,7 @@
 
 export type StorefrontConfig = {
   apiKey: string;
+  workspaceId: string;
   baseUrl?: string;
 };
 
@@ -326,6 +334,19 @@ export type SitePage = {
   metaDescription: string | null;
 };
 
+const metadataString = (metadata: Record<string, unknown>, key: string): string | null =>
+  typeof metadata[key] === 'string' ? metadata[key] : null;
+
+const metadataStrings = (metadata: Record<string, unknown>, key: string): string[] =>
+  Array.isArray(metadata[key])
+    ? metadata[key].filter((value): value is string => typeof value === 'string')
+    : [];
+
+const cents = (value: number | null | undefined): string => ((value ?? 0) / 100).toFixed(2);
+
+const flattenCategories = <T extends { children?: T[] }>(items: T[]): T[] =>
+  items.flatMap((item) => [item, ...flattenCategories(item.children ?? [])]);
+
 // ============================================
 // Client
 // ============================================
@@ -334,10 +355,16 @@ export class StorefrontClient {
   private apiKey: string;
   private baseUrl: string;
   private customerToken: string | null = null;
+  private quick: ReturnType<typeof createQuickConnect>;
 
   constructor(config: StorefrontConfig) {
     this.apiKey = config.apiKey;
-    this.baseUrl = config.baseUrl?.replace(/\/$/, '') || 'https://app.quickdash.net';
+    this.baseUrl = config.baseUrl?.replace(/\/$/, '') || 'https://api.quickdash.xyz';
+    this.quick = createQuickConnect({
+      baseUrl: this.baseUrl,
+      workspaceId: config.workspaceId,
+      credential: { type: 'site', key: config.apiKey },
+    });
   }
 
   /**
@@ -420,6 +447,58 @@ export class StorefrontClient {
     return data as T;
   }
 
+  private async mapQuickProduct(
+    item: QuickCatalogItem,
+    category: Category | null = null,
+    knownAvailability?: QuickCatalogAvailability[]
+  ): Promise<Product> {
+    const [variantsResult, availabilityResult] = await Promise.all([
+      this.quick.catalog.listVariants(item.id),
+      knownAvailability ? null : this.quick.site.availability([item.id]),
+    ]);
+    const variants = variantsResult.data.filter((variant) => variant.status === 'active');
+    const availability = knownAvailability ?? availabilityResult?.data ?? [];
+    const images = metadataStrings(item.metadata, 'images');
+    const thumbnail = metadataString(item.metadata, 'thumbnail') ?? images[0] ?? null;
+    const compareAtPriceCents =
+      typeof item.metadata.compareAtPriceCents === 'number'
+        ? item.metadata.compareAtPriceCents
+        : null;
+
+    return {
+      id: item.id,
+      name: item.name,
+      slug: metadataString(item.metadata, 'slug') ?? item.id,
+      description: item.description,
+      shortDescription: metadataString(item.metadata, 'shortDescription'),
+      price: cents(item.priceCents),
+      compareAtPrice: compareAtPriceCents === null ? null : cents(compareAtPriceCents),
+      images,
+      thumbnail,
+      isSubscribable: Boolean(item.metadata.subscribable),
+      isFeatured: Boolean(item.metadata.featured),
+      category: category ? { id: category.id, name: category.name, slug: category.slug } : null,
+      tags: metadataStrings(item.metadata, 'tags'),
+      variants: variants.map((variant) => this.mapQuickVariant(variant, item.priceCents)),
+      stock: availability.map((entry) => ({
+        variantId: entry.catalogItemVariantId ?? item.id,
+        quantity: entry.availableQuantity ?? (entry.available ? Number.MAX_SAFE_INTEGER : 0),
+      })),
+      createdAt: item.createdAt,
+      metadata: item.metadata,
+    } as Product;
+  }
+
+  private mapQuickVariant(variant: QuickCatalogVariant, fallbackPrice: number | null) {
+    return {
+      id: variant.id,
+      name: variant.options.map((option) => option.value).join(' / ') || variant.combinationKey,
+      sku: variant.sku,
+      price: cents(variant.priceCentsOverride ?? fallbackPrice),
+      attributes: Object.fromEntries(variant.options.map((option) => [option.name, option.value])),
+    };
+  }
+
   // ============================================
   // Products
   // ============================================
@@ -435,22 +514,110 @@ export class StorefrontClient {
       sort?: 'name' | 'price' | 'createdAt';
       order?: 'asc' | 'desc';
     }): Promise<{ products: Product[]; pagination: Pagination }> => {
-      return this.request('/products', {
-        params: {
-          page: options?.page,
-          limit: options?.limit,
-          category: options?.category,
-          search: options?.search,
-          featured: options?.featured,
-          subscribable: options?.subscribable,
-          sort: options?.sort,
-          order: options?.order,
-        },
+      const catalog: QuickCatalogItem[] = [];
+      let cursor: string | undefined;
+      do {
+        const result = await this.quick.catalog.list({
+          cursor,
+          limit: 100,
+          sort: options?.sort === 'createdAt' ? 'createdAt' : options?.sort,
+          direction: options?.order,
+        });
+        catalog.push(...result.data.items);
+        cursor = result.data.page.nextCursor ?? undefined;
+      } while (cursor);
+
+      let category: Category | null = null;
+      let categoryItemIds: Set<string> | null = null;
+      if (options?.category) {
+        const categoryResult = await this.quick.site.listCategories('category');
+        const match = flattenCategories(categoryResult.data.items).find(
+          (item) => item.slug === options.category
+        );
+        if (match) {
+          category = {
+            id: match.id,
+            name: match.name,
+            slug: match.slug,
+            description: typeof match.description === 'string' ? match.description : null,
+            image: typeof match.image === 'string' ? match.image : null,
+            parentId: typeof match.parentId === 'string' ? match.parentId : null,
+            sortOrder: typeof match.sortOrder === 'number' ? match.sortOrder : 0,
+            productCount: match.itemCount,
+          };
+          const membership = await this.quick.site.listCategoryItems(match.slug);
+          categoryItemIds = new Set(membership.data.itemIds);
+        } else {
+          categoryItemIds = new Set();
+        }
+      }
+
+      const search = options?.search?.trim().toLowerCase();
+      const filtered = catalog.filter((item) => {
+        if (categoryItemIds && !categoryItemIds.has(item.id)) return false;
+        if (search && !`${item.name} ${item.description ?? ''}`.toLowerCase().includes(search)) {
+          return false;
+        }
+        if (
+          options?.featured !== undefined &&
+          Boolean(item.metadata.featured) !== options.featured
+        ) {
+          return false;
+        }
+        if (
+          options?.subscribable !== undefined &&
+          Boolean(item.metadata.subscribable) !== options.subscribable
+        ) {
+          return false;
+        }
+        return true;
       });
+
+      if (options?.sort === 'name') filtered.sort((a, b) => a.name.localeCompare(b.name));
+      if (options?.sort === 'price')
+        filtered.sort((a, b) => (a.priceCents ?? 0) - (b.priceCents ?? 0));
+      if (options?.order === 'desc' && options.sort !== 'createdAt') filtered.reverse();
+
+      const page = Math.max(1, options?.page ?? 1);
+      const limit = Math.max(1, options?.limit ?? 20);
+      const pageItems = filtered.slice((page - 1) * limit, page * limit);
+      const availability = pageItems.length
+        ? (await this.quick.site.availability(pageItems.map((item) => item.id))).data
+        : [];
+      const products = await Promise.all(
+        pageItems.map((item) =>
+          this.mapQuickProduct(
+            item,
+            category,
+            availability.filter((entry) => entry.catalogItemId === item.id)
+          )
+        )
+      );
+      return {
+        products,
+        pagination: {
+          page,
+          limit,
+          totalCount: filtered.length,
+          totalPages: Math.ceil(filtered.length / limit),
+          hasMore: page * limit < filtered.length,
+        },
+      };
     },
 
-    get: async (slug: string): Promise<{ product: Product }> => {
-      return this.request(`/products/${slug}`);
+    get: async (idOrSlug: string): Promise<{ product: Product }> => {
+      try {
+        const result = await this.quick.catalog.get(idOrSlug);
+        return { product: await this.mapQuickProduct(result.data) };
+      } catch (error) {
+        if (!(error instanceof Error) || !('status' in error) || error.status !== 404) throw error;
+        const listed = await this.quick.catalog.list({ limit: 100 });
+        const item = listed.data.items.find(
+          (candidate) => metadataString(candidate.metadata, 'slug') === idOrSlug
+        );
+        if (!item) throw new StorefrontError('Product not found', 404, error);
+        return { product: await this.mapQuickProduct(item) };
+      }
     },
   };
 
@@ -463,12 +630,20 @@ export class StorefrontClient {
       count?: boolean;
       parentOnly?: boolean;
     }): Promise<{ categories: Category[] }> => {
-      return this.request('/categories', {
-        params: {
-          count: options?.count,
-          parent_only: options?.parentOnly,
-        },
-      });
+      const result = await this.quick.site.listCategories('category');
+      const source = options?.parentOnly ? result.data.items : flattenCategories(result.data.items);
+      return {
+        categories: source.map((item) => ({
+          id: item.id,
+          name: item.name,
+          slug: item.slug,
+          description: typeof item.description === 'string' ? item.description : null,
+          image: typeof item.image === 'string' ? item.image : null,
+          parentId: typeof item.parentId === 'string' ? item.parentId : null,
+          sortOrder: typeof item.sortOrder === 'number' ? item.sortOrder : 0,
+          productCount: options?.count ? item.itemCount : undefined,
+        })),
+      };
     },
   };
 
@@ -833,7 +1008,61 @@ export class StorefrontClient {
 
   site = {
     getSettings: async (): Promise<{ site: SiteSettings }> => {
-      return this.request('/site');
+      const [contextResult, contentResult] = await Promise.all([
+        this.quick.site.context(),
+        this.quick.site.content(),
+      ]);
+      const content = contentResult.data.content;
+      const value = (key: string, fallback: string | null = null) => {
+        const candidate = content[key] ?? content[key.replace('.', ':')];
+        return typeof candidate === 'string' ? candidate : fallback;
+      };
+      return {
+        site: {
+          name: value('site.name', contextResult.data.workspace.name)!,
+          tagline: value('site.tagline'),
+          description: value('site.description'),
+          logo: value('site.logo'),
+          favicon: value('site.favicon'),
+          email: value('contact.email'),
+          phone: value('contact.phone'),
+          address: value('contact.address'),
+          social: {
+            facebook: value('social.facebook'),
+            instagram: value('social.instagram'),
+            twitter: value('social.twitter'),
+            tiktok: value('social.tiktok'),
+            youtube: value('social.youtube'),
+          },
+          theme: {
+            primaryColor: value('theme.primaryColor', '#000000')!,
+            secondaryColor: value('theme.secondaryColor'),
+            accentColor: value('theme.accentColor'),
+          },
+          currency: value('commerce.currency', 'CAD')!,
+          currencySymbol: value('commerce.currency_symbol', '$')!,
+          taxRate: null,
+          freeShippingThreshold: null,
+          legal: {
+            termsUrl: value('legal.termsUrl'),
+            privacyUrl: value('legal.privacyUrl'),
+            refundPolicyUrl: value('legal.refundPolicyUrl'),
+          },
+          seo: {
+            title: value('seo.title'),
+            description: value('seo.description'),
+            socialImage: value('seo.socialImage'),
+            keywords: value('seo.keywords'),
+            author: value('seo.author'),
+            openGraphTitle: value('seo.openGraphTitle'),
+            openGraphDescription: value('seo.openGraphDescription'),
+            openGraphImage: value('seo.openGraphImage'),
+            twitterTitle: value('seo.twitterTitle'),
+            twitterDescription: value('seo.twitterDescription'),
+            twitterImage: value('seo.twitterImage'),
+          },
+        },
+      };
     },
   };
 
@@ -1051,7 +1280,15 @@ export class StorefrontClient {
 
   siteContent = {
     list: async (): Promise<{ content: SiteContentItem[] }> => {
-      return this.request('/site-content');
+      const result = await this.quick.site.content();
+      return {
+        content: Object.entries(result.data.content).map(([key, value]) => ({
+          id: key,
+          key: key.includes(':') ? key : key.replace('.', ':'),
+          type: typeof value,
+          value: typeof value === 'string' ? value : value == null ? null : JSON.stringify(value),
+        })),
+      };
     },
   };
 
