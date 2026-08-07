@@ -1,14 +1,14 @@
 'use client';
 
-import Link from 'next/link';
 import dynamic from 'next/dynamic';
+import Link from 'next/link';
 import { useEffect, useState } from 'react';
 
 // Dynamically import react-checkmark to avoid SSR issues (it accesses window at module scope)
-const Checkmark = dynamic(
-  () => import('react-checkmark').then((mod) => mod.Checkmark),
-  { ssr: false, loading: () => <div className="w-20 h-20 rounded-full bg-green-500/20 animate-pulse" /> }
-);
+const Checkmark = dynamic(() => import('react-checkmark').then((mod) => mod.Checkmark), {
+  ssr: false,
+  loading: () => <div className="w-20 h-20 rounded-full bg-green-500/20 animate-pulse" />,
+});
 
 interface SuccessStateProps {
   icon?: React.ReactNode;
@@ -104,8 +104,8 @@ export function SuccessState({
             mounted ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4'
           }`}
         >
-          {action && (
-            action.href ? (
+          {action &&
+            (action.href ? (
               <Link
                 href={action.href}
                 className="px-6 py-3 bg-white text-black font-semibold rounded-lg hover:bg-white/90 transition-colors"
@@ -119,10 +119,9 @@ export function SuccessState({
               >
                 {action.label}
               </button>
-            )
-          )}
-          {secondaryAction && (
-            secondaryAction.href ? (
+            ))}
+          {secondaryAction &&
+            (secondaryAction.href ? (
               <Link
                 href={secondaryAction.href}
                 className="px-6 py-3 border border-white/30 text-white font-semibold rounded-lg hover:bg-white/5 transition-colors"
@@ -136,8 +135,7 @@ export function SuccessState({
               >
                 {secondaryAction.label}
               </button>
-            )
-          )}
+            ))}
         </div>
       )}
     </div>
@@ -156,7 +154,10 @@ export function OrderSuccess({ orderId, total }: { orderId?: string; total?: str
       icon={<AnimatedCheckmark size={100} />}
       title="Thank You for Your Order"
       description={description}
-      action={{ label: 'View Order Details', href: orderId ? `/account/orders/${orderId}` : '/account/orders' }}
+      action={{
+        label: 'View Order Details',
+        href: orderId ? `/account/orders/${orderId}` : '/account/orders',
+      }}
       secondaryAction={{ label: 'Continue Shopping', href: '/shop' }}
     />
   );
@@ -172,7 +173,7 @@ export function PaymentSuccess({ amount }: { amount?: string }) {
       description={
         amount
           ? `Your payment of ${amount} was processed successfully. A receipt has been sent to your email.`
-          : "Your payment was processed successfully. A receipt has been sent to your email."
+          : 'Your payment was processed successfully. A receipt has been sent to your email.'
       }
       action={{ label: 'View Receipt', href: '/account/orders' }}
     />
@@ -188,7 +189,7 @@ export function AddToCartSuccess({ productName }: { productName?: string }) {
       description={
         productName
           ? `${productName} is now in your cart and waiting for you.`
-          : "Your selection has been added to your cart."
+          : 'Your selection has been added to your cart.'
       }
       action={{ label: 'View Gem Pouch', href: '/gem-pouch' }}
       secondaryAction={{ label: 'Keep Shopping', href: '/shop' }}
@@ -205,7 +206,7 @@ export function WishlistSuccess({ productName }: { productName?: string }) {
       description={
         productName
           ? `${productName} has been added to your wishlist. We'll let you know if the price changes.`
-          : "This gem has been saved to your wishlist."
+          : 'This gem has been saved to your wishlist.'
       }
       action={{ label: 'View Wishlist', href: '/wishlist' }}
       secondaryAction={{ label: 'Keep Exploring', href: '/shop' }}
@@ -222,7 +223,7 @@ export function ReviewSubmittedSuccess({ productName }: { productName?: string }
       description={
         productName
           ? `Thank you for sharing your thoughts on ${productName}. Your review helps others discover quality gems.`
-          : "Thank you for sharing your thoughts. Your review helps others discover quality gems."
+          : 'Thank you for sharing your thoughts. Your review helps others discover quality gems.'
       }
       action={{ label: 'Continue Shopping', href: '/shop' }}
     />
@@ -235,11 +236,11 @@ export function AccountCreatedSuccess({ email }: { email?: string }) {
     <SuccessState
       variant="celebration"
       icon={<AnimatedCheckmark size={100} />}
-      title="Welcome to Gemsutopia"
+      title="Check your email"
       description={
         email
-          ? `Your account has been created. We've sent a verification link to ${email}.`
-          : "Your account has been created. Please check your email to verify your account and start exploring our collection."
+          ? `We sent a secure sign-in link to ${email}. It expires in 15 minutes and can only be used once.`
+          : 'We sent a secure, one-time sign-in link to your email.'
       }
       action={{ label: 'Explore Our Collection', href: '/shop' }}
       secondaryAction={{ label: 'Go to Account', href: '/account' }}
@@ -273,8 +274,14 @@ export function EmailVerifiedSuccess() {
 }
 
 // Bid Placed Success
-export function BidPlacedSuccess({ amount, productName }: { amount?: string; productName?: string }) {
-  let description = "Your bid has been placed.";
+export function BidPlacedSuccess({
+  amount,
+  productName,
+}: {
+  amount?: string;
+  productName?: string;
+}) {
+  let description = 'Your bid has been placed.';
   if (amount && productName) {
     description = `Your bid of ${amount} on ${productName} is now active. We'll notify you if someone outbids you.`;
   } else if (amount) {
@@ -295,8 +302,15 @@ export function BidPlacedSuccess({ amount, productName }: { amount?: string; pro
 }
 
 // Auction Won Success - BIG celebration moment
-export function AuctionWonSuccess({ productName, finalPrice }: { productName?: string; finalPrice?: string }) {
-  let description = "Congratulations! You've won the auction. Complete your purchase to secure your gem.";
+export function AuctionWonSuccess({
+  productName,
+  finalPrice,
+}: {
+  productName?: string;
+  finalPrice?: string;
+}) {
+  let description =
+    "Congratulations! You've won the auction. Complete your purchase to secure your gem.";
   if (productName && finalPrice) {
     description = `Congratulations! You've won ${productName} for ${finalPrice}. Complete your purchase to claim your gem.`;
   } else if (productName) {
@@ -372,7 +386,7 @@ export function SignInSuccess({ name }: { name?: string }) {
   return (
     <SuccessState
       icon={<AnimatedCheckmark size={80} />}
-      title={name ? `Welcome back, ${name}` : "Welcome Back"}
+      title={name ? `Welcome back, ${name}` : 'Welcome Back'}
       description="You're now signed in. Pick up where you left off."
       action={{ label: 'Continue Shopping', href: '/shop' }}
     />
@@ -381,7 +395,7 @@ export function SignInSuccess({ name }: { name?: string }) {
 
 // Checkout Success (after full checkout flow)
 export function CheckoutSuccess({ orderId, email }: { orderId?: string; email?: string }) {
-  let description = "Your order is confirmed and being prepared.";
+  let description = 'Your order is confirmed and being prepared.';
   if (orderId && email) {
     description = `Order #${orderId} is confirmed. We've sent the details to ${email} and will notify you when it ships.`;
   } else if (orderId) {
@@ -396,7 +410,10 @@ export function CheckoutSuccess({ orderId, email }: { orderId?: string; email?: 
       icon={<AnimatedCheckmark size={100} />}
       title="Order Confirmed"
       description={description}
-      action={{ label: 'View Order', href: orderId ? `/account/orders/${orderId}` : '/account/orders' }}
+      action={{
+        label: 'View Order',
+        href: orderId ? `/account/orders/${orderId}` : '/account/orders',
+      }}
       secondaryAction={{ label: 'Continue Shopping', href: '/shop' }}
     />
   );

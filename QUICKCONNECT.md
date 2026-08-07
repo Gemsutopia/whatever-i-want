@@ -23,16 +23,24 @@ Docker Postgres on port 5435 and writes this repository's gitignored `apps/web/.
 
 ## Integration order
 
-1. Catalog, product detail, categories, published content and authoritative availability.
-2. Customer identity, wishlist, reviews and referrals.
-3. Discounts and shipping quotes.
-4. Server-authoritative checkout and payment-provider next actions.
-5. Owned orders, shipment status, portal access and private messages.
-6. A complete synthetic browse-to-fulfillment-and-message acceptance journey.
+1. ✅ Catalog, product detail, categories, published content and authoritative availability.
+2. ✅ Passwordless customer identity, storefront session verification, guest wishlist merge,
+   published and pending reviews, referral ownership and sign-out revocation.
+3. ✅ Discount codes priced against the real basket, and server-priced delivery options.
+4. ✅ Server-authoritative checkout: the order and its payment are opened in one call, and the
+   return trip only captures. PayPal sandbox capture itself is unproven locally — no credentials.
+5. ✅ Owned orders and shipment status, private two-way messages, and a single-use pass into the
+   hosted portal that never moves the storefront's session across origins.
+6. ✅ `pnpm proof:gemsutopia:lifecycle` covers browse, sign-in, discount, delivery, order,
+   isolation, the operator/customer round trip and the portal handoff against Docker.
 
 The intended hosted customer portal is `account.gemsutopia.ca`. Gemsutopia remains the shopping
 surface; the hosted portal is the customer's account, order, tracking, invoice and message
 surface; QuickDash is Reese's private operating surface.
+
+Storefront sign-in links return to `/auth/verify` on the registered Gemsutopia origin. Portal
+sign-in continues to return to the hosted portal. Both sessions are workspace-scoped bearer
+sessions and neither origin silently receives the other's browser storage.
 
 ## Production cutover
 

@@ -1,5 +1,5 @@
 'use client';
-import { IconPackage, IconArrowRight } from '@tabler/icons-react';
+import { IconArrowRight, IconPackage } from '@tabler/icons-react';
 import React, { useEffect } from 'react';
 import { AnimatedCheckmark } from '@/components/success-states';
 
@@ -19,15 +19,10 @@ interface OrderSuccessProps {
   subtotal?: number;
   shipping?: number;
   shippingMethod?: 'flat' | 'combined';
+  /** The code QuickDash matched, and the amount it took off. */
   appliedDiscount?: {
     code: string;
-    type: 'percentage' | 'fixed_amount' | 'fixed';
-    value: number;
-    amount: number;
-    free_shipping: boolean;
-    isReferral?: boolean;
-    referrerName?: string;
-    description?: string;
+    amountCents: number;
   };
   shippingAddress?: {
     firstName: string;
@@ -57,16 +52,21 @@ export default function OrderSuccess({
 }: OrderSuccessProps) {
   // RECALCULATE values exactly like CheckoutFlow to ensure accuracy
   const calculatedSubtotal = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
-  const calculatedDiscount = appliedDiscount?.amount || 0;
+  const calculatedDiscount = (appliedDiscount?.amountCents ?? 0) / 100;
 
   // Use calculated values if they're valid, otherwise use passed values
   const actualSubtotal = calculatedSubtotal > 0 ? calculatedSubtotal : subtotal || 0;
   const actualDiscount = calculatedDiscount;
 
-  // USE THE PRESERVED SHIPPING VALUE FROM CHECKOUT - DO NOT RECALCULATE
-  const finalShipping = appliedDiscount?.free_shipping ? 0 : shipping || 0;
-
-  const actualShipping = finalShipping;
+  /**
+   * The shipping figure QuickDash charged, shown as-is.
+   *
+   * There is no `free_shipping` branch any more. Whether a code waives delivery
+   * is decided by the server when it prices the rate, and it comes back as an
+   * amount of zero — re-deciding it here meant a receipt could show free
+   * shipping on an order that was charged for it.
+   */
+  const actualShipping = shipping || 0;
 
   useEffect(() => {
     // Simple CSS-based confetti animation instead of external script
@@ -210,8 +210,7 @@ export default function OrderSuccess({
                     <div className="flex justify-between text-green-600">
                       <span>Discount ({appliedDiscount.code}):</span>
                       <span>
-                        -
-                        ${appliedDiscount.amount.toFixed(2)} {currency}
+                        -${actualDiscount.toFixed(2)} {currency}
                       </span>
                     </div>
                   )}
@@ -225,7 +224,7 @@ export default function OrderSuccess({
                       :
                     </span>
                     <span>
-                      {appliedDiscount?.free_shipping ? (
+                      {actualShipping === 0 ? (
                         <span className="text-green-600">FREE</span>
                       ) : (
                         `$${actualShipping.toFixed(2)} ${currency}`

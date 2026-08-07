@@ -13,7 +13,7 @@ import { store } from '@/lib/store';
 import CartReview from './CartReview';
 import CustomerInfo from './CustomerInfo';
 import OrderSuccess from './OrderSuccess';
-import PaymentForm from './PaymentForm';
+import PaymentForm, { type StoredCheckout } from './PaymentForm';
 import PaymentMethods from './PaymentMethods';
 
 type CheckoutCurrency = 'CAD' | 'USD';
@@ -116,14 +116,19 @@ export default function CheckoutFlow() {
     }
   }, []);
 
-  // Check for stored referral code from URL tracking
+  /**
+   * A referral code carried in from a share link.
+   *
+   * ⚠️ It is NOT pre-filled into the discount box any more. QuickDash keeps the
+   * two apart on purpose: a discount changes what this order costs, a referral
+   * records who brought this customer and pays the referrer once the order
+   * settles. Merging them into one field made a referral look like money off,
+   * and meant a shopper who cleared the box silently lost the referrer's credit.
+   */
+  const [referralCode, setReferralCode] = useState<string | null>(null);
   useEffect(() => {
-    const storedRefCode = getStoredReferralCode();
-    if (storedRefCode && !appliedDiscount) {
-      // Pre-fill the discount code field with the stored referral code
-      setDiscountCode(storedRefCode);
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    setReferralCode(getStoredReferralCode() || null);
+  }, []);
 
   // Handle return from PayPal.
   useEffect(() => {
@@ -151,8 +156,7 @@ export default function CheckoutFlow() {
         return;
       }
 
-      const storageKey = 'paypalCheckoutData';
-      let paymentWasCaptured = false;
+      const storageKey = 'quickdashCheckout';
       setIsFinalizingPayment(true);
 
       try {
@@ -167,128 +171,71 @@ export default function CheckoutFlow() {
           return;
         }
 
-        const savedData = JSON.parse(checkoutDataStr);
-        const paymentRecord: any = {
-          provider: paymentMethod,
-          method: paymentMethod,
-          amount: savedData.amount,
-          currency: savedData.currency,
-          status: 'paid',
-        };
+        const saved: StoredCheckout = JSON.parse(checkoutDataStr);
 
-        const captureResult =
-          savedData.captureResult || (await store.payments.capturePayPalOrder(savedData.orderId));
-        if (captureResult.status !== 'COMPLETED' && !captureResult.captureId) {
-          const paypalMessage = `PayPal payment was not completed. Status: ${captureResult.status || 'unknown'}`;
-          toast.error(paypalMessage);
-          setError(paypalMessage);
+        /**
+         * 🔴 The order already exists. This only settles its payment.
+         *
+         * The prototype captured at PayPal and THEN tried to create the order,
+         * which is why it had an apology for "your payment was successful, but we
+         * could not finish recording the order" — a real charge with nothing
+         * behind it, recoverable only by hand.
+         *
+         * QuickDash wrote the order before the shopper ever reached PayPal, and
+         * keys settlement on the provider's payment id. Refreshing this page,
+         * or returning to it twice, confirms the same order rather than charging
+         * again — so there is no longer a window where money moves and the sale
+         * does not exist.
+         */
+        const { settlement } = await store.checkout.capture(saved.externalPaymentId);
+
+        if (!settlement.applied) {
+          // The payment did not settle onto the order. The order stays unpaid and
+          // is safe to retry; it is never silently treated as sold.
+          const reason = settlement.reason ?? 'The payment was not completed.';
+          toast.error(reason);
+          setError(reason);
           setErrorAction('return');
           setCurrentStep('error');
           return;
         }
-        paymentWasCaptured = true;
-        paymentRecord.captureID = captureResult.captureId;
-        paymentRecord.externalId = captureResult.captureId || savedData.orderId;
-        paymentRecord.orderId = savedData.orderId;
 
-        if (!savedData.captureResult) {
-          savedData.captureResult = captureResult;
-          sessionStorage.setItem(storageKey, JSON.stringify(savedData));
-        }
+        // The referral was recorded at checkout and its reward completed by the
+        // capture above, so there is nothing to "apply" here — only the local
+        // tracking cookie to retire.
+        clearStoredReferralCode();
 
-        // Create order via Quickdash storefront API
-        const orderResult = await store.orders.create({
-          customer: {
-            email: savedData.customerData.email,
-            firstName: savedData.customerData.firstName,
-            lastName: savedData.customerData.lastName,
-            phone: savedData.customerData.phone,
-          },
-          shippingAddress: {
-            firstName: savedData.customerData.firstName,
-            lastName: savedData.customerData.lastName,
-            addressLine1:
-              savedData.customerData.addressLine1 || savedData.customerData.address || '',
-            addressLine2: savedData.customerData.addressLine2 || '',
-            city: savedData.customerData.city || '',
-            state: savedData.customerData.state || savedData.customerData.province || '',
-            postalCode: savedData.customerData.postalCode || savedData.customerData.zip || '',
-            country: savedData.customerData.country || 'CA',
-            phone: savedData.customerData.phone,
-          },
-          items: savedData.items.map((item: any) => ({
-            name: item.name,
-            price: item.price,
-            quantity: item.quantity,
-            productId: item.id,
-            variantId: item.variantId,
-            sku: item.sku,
-            image: item.image,
-          })),
-          payment: paymentRecord,
-          totals: {
-            subtotal: savedData.subtotal,
-            discount: savedData.appliedDiscount?.amount || 0,
-            tax: 0,
-            shipping: savedData.shipping,
-            total: savedData.amount,
-          },
-          discountCode: savedData.appliedDiscount || null,
-          metadata: {
-            paymentProvider: paymentMethod,
-            paypalOrderId: savedData.orderId,
-            paypalCaptureId: paymentRecord.captureID,
-            checkoutAttemptId: savedData.checkoutAttemptId,
-          },
-        });
-
-        // Apply referral if applicable
-        if (savedData.appliedDiscount?.isReferral && savedData.appliedDiscount?.referralId) {
-          try {
-            await fetch('/api/referrals/apply', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                referralId: savedData.appliedDiscount.referralId,
-                orderId: orderResult.order.id,
-                orderTotal: savedData.amount,
-                discountApplied: savedData.appliedDiscount.amount,
-                referredEmail: savedData.customerData.email,
-                referredName: `${savedData.customerData.firstName} ${savedData.customerData.lastName}`,
-              }),
-            });
-            clearStoredReferralCode();
-          } catch (error) {
-            console.error('Failed to apply referral:', error);
-          }
-        }
-
-        // Clear stored checkout data
         sessionStorage.removeItem(storageKey);
 
-        // Update state
+        const { receipt } = saved;
         setCheckoutData((prev) => ({
           ...prev,
-          customer: savedData.customerData,
+          customer: saved.customerData,
           paymentMethod: 'paypal',
         }));
-        setAppliedDiscount(savedData.appliedDiscount || null);
 
-        setOrderId(orderResult.order.id);
+        setOrderId(saved.orderNumber);
         setPaymentInfo({
-          actualAmount: savedData.amount,
-          currency: savedData.currency,
+          actualAmount: receipt.totalCents / 100,
+          currency: receipt.currency,
         });
 
-        setPreservedItems(savedData.items);
-        setPreservedSubtotal(savedData.subtotal);
-        setFinalShipping(savedData.shipping);
+        setPreservedItems(
+          receipt.lines.map((line) => ({
+            id: line.id,
+            name: line.name,
+            price: line.unitPriceCents / 100,
+            quantity: line.quantity,
+          })) as typeof items
+        );
+        setPreservedSubtotal(receipt.subtotalCents / 100);
+        setFinalShipping(receipt.shippingCents / 100);
 
         setCurrentStep('success');
         clearPouch();
         refreshShopProducts();
 
-        savedData.items.forEach((item: any) => {
+        items.forEach((item) => {
           refreshProduct(item.id);
         });
 
@@ -297,9 +244,9 @@ export default function CheckoutFlow() {
       } catch (err) {
         console.error('Checkout error:', err);
         const detail = getCheckoutErrorMessage(err);
-        const supportMessage = paymentWasCaptured
-          ? `Your payment was successful, but we could not finish recording the order. It is safe to retry this confirmation. Detail: ${detail}`
-          : `We could not finish confirming the PayPal payment. No new payment will be started when you retry. Detail: ${detail}`;
+        // Retrying is always safe now: the order exists and capture is keyed on
+        // the provider's payment id, so a second attempt settles the same sale.
+        const supportMessage = `We could not finish confirming the PayPal payment. Your order is recorded and retrying will not charge you twice. Detail: ${detail}`;
         try {
           localStorage.setItem(
             'lastCheckoutError',
@@ -333,26 +280,22 @@ export default function CheckoutFlow() {
   // TAX REMOVED
   // TAX REMOVED
   const [discountCode, setDiscountCode] = useState<string>('');
+  /**
+   * Only what QuickDash confirmed: the code it matched, and the amount IT worked
+   * out. No type, no percentage, no free-shipping flag — every one of those was a
+   * rule the browser used to re-apply locally, and any drift between its answer
+   * and the server's showed up as a total that changed at the last step.
+   */
   const [appliedDiscount, setAppliedDiscount] = useState<{
     code: string;
-    type: 'percentage' | 'fixed_amount' | 'fixed';
-    value: number;
-    amount: number;
-    free_shipping: boolean;
-    // Referral-specific fields
-    isReferral?: boolean;
-    referralId?: string;
-    referrerName?: string;
-    description?: string;
-    // Discount code specific
-    discountCodeId?: string;
+    amountCents: number;
   } | null>(null);
   const [discountError, setDiscountError] = useState<string>('');
   // Calculate totals
   const subtotal = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
 
   // Calculate discount
-  const discount = appliedDiscount?.amount || 0;
+  const discount = (appliedDiscount?.amountCents ?? 0) / 100;
   const subtotalAfterDiscount = subtotal - discount;
 
   // NO TAX - REMOVED ENTIRELY
@@ -364,6 +307,13 @@ export default function CheckoutFlow() {
 
   // Calculate shipping dynamically with fresh settings
   const [shipping, setShipping] = useState<number>(0); // Start at 0, will load properly
+  /**
+   * The id of the rate QuickDash offered, kept so checkout can name it.
+   *
+   * ⚠️ Checkout takes the ID, not the amount. The server re-prices the rate it
+   * issued, so a browser cannot select a $25 express option and pay $5 for it.
+   */
+  const [shippingRateId, setShippingRateId] = useState<string | null>(null);
   const [shippingCurrency, setShippingCurrency] = useState<CheckoutCurrency>('CAD');
   const [shippingError, setShippingError] = useState<string | null>(null);
   const [isCalculatingShipping, setIsCalculatingShipping] = useState(false);
@@ -378,15 +328,13 @@ export default function CheckoutFlow() {
       return true;
     }
 
-    if (appliedDiscount?.free_shipping) {
-      setShipping(0);
-      setShippingCurrency(currentCurrency);
-      setShippingError(null);
-      return true;
-    }
+    // Free shipping is no longer decided here. QuickDash resolves the discount
+    // and returns it as `option.free`, so the browser cannot waive its own
+    // shipping by setting a flag in local state.
 
     if (items.length === 0) {
       setShipping(0);
+      setShippingRateId(null);
       setShippingCurrency(currentCurrency);
       setShippingError(null);
       return true;
@@ -394,23 +342,32 @@ export default function CheckoutFlow() {
 
     setIsCalculatingShipping(true);
     try {
-      const country = getShippingCountryCode(customer.country || 'Canada');
-      const ratesResult = await store.shipping.getRates({
-        country,
-        state: customer.state || undefined,
-        subtotal,
+      const quote = await store.shipping.quote({
+        items: items.map((item) => ({
+          catalogItemId: item.id,
+          ...(item.variantId ? { variantId: item.variantId } : {}),
+          quantity: item.quantity,
+        })),
+        destination: {
+          countryCode: getShippingCountryCode(customer.country || 'Canada'),
+          ...(customer.state ? { regionCode: customer.state } : {}),
+          ...(customer.zipCode ? { postalCode: customer.zipCode } : {}),
+        },
+        ...(appliedDiscount?.code ? { discountCode: appliedDiscount.code } : {}),
       });
-      const cheapestRate = ratesResult.rates
-        ?.filter((rate) => Number.isFinite(rate.price) && rate.price >= 0)
-        .sort((a, b) => a.price - b.price)[0];
-      if (!cheapestRate) {
+
+      // The server priced every option; choosing the cheapest is presentation.
+      const cheapest = [...quote.options].sort((a, b) => a.amountCents - b.amountCents)[0];
+      if (!cheapest) {
         throw new Error('No shipping rate is available for this address');
       }
-      setShipping(cheapestRate.price);
+      setShipping(cheapest.amountCents / 100);
+      setShippingRateId(cheapest.rateId);
       setShippingCurrency('CAD');
       setShippingError(null);
       return true;
     } catch {
+      setShippingRateId(null);
       setShippingError('Shipping could not be calculated. Check the address or try again.');
       return false;
     } finally {
@@ -438,6 +395,18 @@ export default function CheckoutFlow() {
     setCheckoutData((prev) => ({ ...prev, ...updates }));
   };
 
+  /**
+   * Ask QuickDash what the code is worth against the real basket.
+   *
+   * 🔴 The cart goes up; a subtotal never does. The prototype posted the
+   * browser's own `orderTotal`, so a shopper could claim any order value to clear
+   * a minimum-spend threshold or take a percentage off a number they invented.
+   *
+   * ⚠️ Referral codes are no longer accepted in this box. QuickDash treats a
+   * referral as attribution — it records who brought this customer and pays the
+   * REFERRER — and deliberately does not change what this order costs. The code
+   * arrives from the share link and rides along to checkout separately.
+   */
   const validateDiscountCode = async () => {
     if (!discountCode.trim()) {
       setDiscountError('Please enter a code');
@@ -447,60 +416,26 @@ export default function CheckoutFlow() {
     setDiscountError('');
 
     try {
-      // Use unified endpoint that handles both referral and discount codes
-      const response = await fetch('/api/referrals/validate', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          code: discountCode.trim(),
-          customerEmail: checkoutData.customer.email || undefined,
-          orderTotal: subtotal,
-        }),
+      const preview = await store.discounts.preview({
+        code: discountCode.trim(),
+        items: items.map((item) => ({
+          catalogItemId: item.id,
+          ...(item.variantId ? { variantId: item.variantId } : {}),
+          quantity: item.quantity,
+        })),
       });
 
-      const result = await response.json();
-
-      if (!result.success) {
-        setDiscountError(result.error?.message || 'Error validating code');
+      if (!preview.valid) {
+        setDiscountError(preview.message);
         return;
       }
 
-      const { data } = result;
-
-      if (data.valid && data.discount) {
-        // Handle both referral and discount codes
-        if (data.type === 'referral') {
-          setAppliedDiscount({
-            code: data.code,
-            type: data.discount.type === 'percentage' ? 'percentage' : 'fixed_amount',
-            value: data.discount.value,
-            amount: data.discount.amount,
-            free_shipping: false,
-            isReferral: true,
-            referralId: data.referral?.id,
-            referrerName: data.referral?.referrerName,
-            description: data.discount.description,
-          });
-        } else {
-          // Regular discount code
-          setAppliedDiscount({
-            code: data.code,
-            type: data.discount.type === 'percentage' ? 'percentage' : 'fixed_amount',
-            value: data.discount.value,
-            amount: data.discount.amount,
-            free_shipping: data.discount.freeShipping || false,
-            isReferral: false,
-            discountCodeId: data.discountCode?.id,
-            description: data.discount.description,
-          });
-        }
-        setDiscountCode('');
-        toast.success(data.message);
-      } else {
-        setDiscountError(data.message || 'Invalid code');
-      }
+      setAppliedDiscount({
+        code: preview.code,
+        amountCents: preview.discountCents,
+      });
+      setDiscountCode('');
+      toast.success(`${preview.code} applied.`);
     } catch {
       setDiscountError('Error validating code');
     }
@@ -742,20 +677,24 @@ export default function CheckoutFlow() {
               <PaymentMethods onSelect={(method) => handleStepComplete('payment-method', method)} />
             )}
 
-            {currentStep === 'payment' && (
+            {currentStep === 'payment' && shippingRateId && (
               <PaymentForm
                 paymentMethod={checkoutData.paymentMethod!}
                 amount={total}
                 currency={currentCurrency}
                 customerData={checkoutData.customer}
-                items={displayItems}
-                validationItems={items}
-                appliedDiscount={
-                  appliedDiscount ? { ...appliedDiscount, amount: displayDiscount } : null
-                }
-                subtotal={displaySubtotal}
-                shipping={displayShipping}
-                onSuccess={(data) => handleStepComplete('payment', data)}
+                items={items}
+                /**
+                 * The catalog-currency total, in cents — NOT the converted one on
+                 * screen. QuickDash prices in the catalog's own currency, so a
+                 * shopper browsing in USD must still be compared against CAD or
+                 * the guard would fire on every order.
+                 */
+                expectedTotalCents={Math.round((subtotalAfterDiscount + shipping) * 100)}
+                discountCode={appliedDiscount?.code ?? null}
+                referralCode={referralCode}
+                shippingRateId={shippingRateId}
+                countryCode={getShippingCountryCode(checkoutData.customer.country || 'Canada')}
                 onError={handleError}
               />
             )}
@@ -772,9 +711,7 @@ export default function CheckoutFlow() {
                     items={preservedItems}
                     subtotal={preservedSubtotal}
                     shipping={finalShipping || shipping}
-                    appliedDiscount={
-                      appliedDiscount ? { ...appliedDiscount, amount: displayDiscount } : undefined
-                    }
+                    appliedDiscount={appliedDiscount ?? undefined}
                     shippingAddress={checkoutData.customer}
                   />
                 </div>

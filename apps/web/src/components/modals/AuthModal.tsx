@@ -1,14 +1,14 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { IconX } from '@tabler/icons-react';
 import Image from 'next/image';
 import Link from 'next/link';
-import { IconX } from '@tabler/icons-react';
-import { Button } from '@/components/ui/button';
-import { signUp, signIn } from '@/lib/auth-client';
+import { useRouter } from 'next/navigation';
+import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { AccountCreatedSuccess } from '@/components/success-states';
+import { Button } from '@/components/ui/button';
+import { signIn } from '@/lib/auth-client';
 
 // Product images for random selection
 const gemImages = [
@@ -31,9 +31,8 @@ interface AuthModalProps {
   redirectTo?: string;
 }
 
-export default function AuthModal({ mode: initialMode, onClose, redirectTo = '/shop' }: AuthModalProps) {
+export default function AuthModal({ onClose }: AuthModalProps) {
   const router = useRouter();
-  const [mode, setMode] = useState(initialMode);
   const [randomImage, setRandomImage] = useState(gemImages[0]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);
@@ -41,35 +40,12 @@ export default function AuthModal({ mode: initialMode, onClose, redirectTo = '/s
 
   const [formData, setFormData] = useState({
     email: '',
-    password: '',
-    confirmPassword: '',
-    firstName: '',
-    lastName: '',
   });
 
   // Pick random image on mount
   useEffect(() => {
     setRandomImage(gemImages[Math.floor(Math.random() * gemImages.length)]);
   }, []);
-
-  // Password strength calculation
-  const getPasswordStrength = (password: string) => {
-    if (!password) return { score: 0, label: '', color: '' };
-    let score = 0;
-    if (password.length >= 8) score++;
-    if (password.length >= 12) score++;
-    if (/[A-Z]/.test(password)) score++;
-    if (/[0-9]/.test(password)) score++;
-    if (/[^A-Za-z0-9]/.test(password)) score++;
-
-    if (score <= 1) return { score: 1, label: 'Weak', color: 'bg-red-500' };
-    if (score <= 2) return { score: 2, label: 'Fair', color: 'bg-orange-500' };
-    if (score <= 3) return { score: 3, label: 'Good', color: 'bg-yellow-500' };
-    if (score <= 4) return { score: 4, label: 'Strong', color: 'bg-green-500' };
-    return { score: 5, label: 'Very Strong', color: 'bg-emerald-500' };
-  };
-
-  const passwordStrength = getPasswordStrength(formData.password);
 
   // Lock body scroll
   useEffect(() => {
@@ -92,44 +68,13 @@ export default function AuthModal({ mode: initialMode, onClose, redirectTo = '/s
     setIsSubmitting(true);
 
     try {
-      if (mode === 'sign-up') {
-        if (formData.password !== formData.confirmPassword) {
-          toast.error('Passwords do not match');
-          setIsSubmitting(false);
-          return;
-        }
-
-        if (formData.password.length < 8) {
-          toast.error('Password must be at least 8 characters');
-          setIsSubmitting(false);
-          return;
-        }
-
-        const fullName = `${formData.firstName} ${formData.lastName}`.trim();
-        const { error } = await signUp.email({
-          email: formData.email,
-          password: formData.password,
-          name: fullName || '',
-        });
-
-        if (error) {
-          toast.error(error.message || 'Failed to create account');
-        } else {
-          setSuccessEmail(formData.email);
-          setShowSuccess(true);
-        }
-      } else {
-        const { error } = await signIn.email({
-          email: formData.email,
-          password: formData.password,
-        });
-
-        if (error) {
-          toast.error(error.message || 'Invalid email or password');
-        } else {
-          toast.success('Welcome back!');
-          router.push(redirectTo);
-        }
+      const result = await signIn.email({
+        email: formData.email,
+      });
+      if (result.error) toast.error(result.error.message || 'Failed to send sign-in link');
+      else {
+        setSuccessEmail(formData.email);
+        setShowSuccess(true);
       }
     } catch {
       toast.error('Something went wrong. Please try again.');
@@ -172,47 +117,14 @@ export default function AuthModal({ mode: initialMode, onClose, redirectTo = '/s
           <div className="p-4 md:p-8">
             <div className="mb-4 md:mb-6 text-center">
               <h1 className="mb-2 font-[family-name:var(--font-bacasime)] text-2xl text-white md:text-3xl">
-                {mode === 'sign-up' ? 'Create Your Account' : 'Welcome Back'}
+                Sign in to Gemsutopia
               </h1>
               <p className="text-sm text-white/60">
-                {mode === 'sign-up'
-                  ? 'Join Gemsutopia and discover rare gems'
-                  : 'Sign in to continue your journey'}
+                We will email you a secure, one-time sign-in link. No password required.
               </p>
             </div>
 
             <form onSubmit={handleSubmit} className="flex flex-col gap-3 md:gap-4">
-              {mode === 'sign-up' && (
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="flex flex-col gap-1">
-                    <label htmlFor="firstName" className="text-xs text-white/70">
-                      First Name
-                    </label>
-                    <input
-                      type="text"
-                      id="firstName"
-                      value={formData.firstName}
-                      onChange={(e) => setFormData((prev) => ({ ...prev, firstName: e.target.value }))}
-                      placeholder="First name"
-                      className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 md:py-2 text-sm text-white placeholder-white/40 outline-none transition-colors focus:border-white/30"
-                    />
-                  </div>
-                  <div className="flex flex-col gap-1">
-                    <label htmlFor="lastName" className="text-xs text-white/70">
-                      Last Name
-                    </label>
-                    <input
-                      type="text"
-                      id="lastName"
-                      value={formData.lastName}
-                      onChange={(e) => setFormData((prev) => ({ ...prev, lastName: e.target.value }))}
-                      placeholder="Last name"
-                      className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 md:py-2 text-sm text-white placeholder-white/40 outline-none transition-colors focus:border-white/30"
-                    />
-                  </div>
-                </div>
-              )}
-
               <div className="flex flex-col gap-1">
                 <label htmlFor="email" className="text-xs text-white/70">
                   Email
@@ -228,93 +140,13 @@ export default function AuthModal({ mode: initialMode, onClose, redirectTo = '/s
                 />
               </div>
 
-              <div className="flex flex-col gap-1">
-                <label htmlFor="password" className="text-xs text-white/70">
-                  Password
-                </label>
-                <input
-                  type="password"
-                  id="password"
-                  value={formData.password}
-                  onChange={(e) => setFormData((prev) => ({ ...prev, password: e.target.value }))}
-                  placeholder="••••••••"
-                  required
-                  className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 md:py-2 text-sm text-white placeholder-white/40 outline-none transition-colors focus:border-white/30"
-                />
-                {mode === 'sign-up' && formData.password && (
-                  <div className="mt-1 flex items-center gap-2">
-                    <div className="flex flex-1 gap-1">
-                      {[1, 2, 3, 4, 5].map(i => (
-                        <div
-                          key={i}
-                          className={`h-1 flex-1 rounded-full transition-colors ${
-                            i <= passwordStrength.score ? passwordStrength.color : 'bg-white/10'
-                          }`}
-                        />
-                      ))}
-                    </div>
-                    <span className="text-xs text-white/50">{passwordStrength.label}</span>
-                  </div>
-                )}
-              </div>
-
-              {mode === 'sign-up' && (
-                <div className="flex flex-col gap-1">
-                  <label htmlFor="confirmPassword" className="text-xs text-white/70">
-                    Confirm Password
-                  </label>
-                  <input
-                    type="password"
-                    id="confirmPassword"
-                    value={formData.confirmPassword}
-                    onChange={(e) => setFormData((prev) => ({ ...prev, confirmPassword: e.target.value }))}
-                    placeholder="••••••••"
-                    required
-                    className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 md:py-2 text-sm text-white placeholder-white/40 outline-none transition-colors focus:border-white/30"
-                  />
-                  <p className="text-xs text-white/40">Must be at least 8 characters</p>
-                </div>
-              )}
-
               <Button
                 type="submit"
                 disabled={isSubmitting}
                 className="mt-1 md:mt-2 h-10 md:h-11 w-full rounded-lg bg-white font-[family-name:var(--font-inter)] text-sm text-black transition-all duration-200 hover:bg-white/90 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {isSubmitting
-                  ? mode === 'sign-up'
-                    ? 'Creating Account...'
-                    : 'Signing In...'
-                  : mode === 'sign-up'
-                    ? 'Create Account'
-                    : 'Sign In'}
+                {isSubmitting ? 'Sending secure link…' : 'Email me a sign-in link'}
               </Button>
-
-              <p className="mt-1 md:mt-2 text-center text-xs text-white/40">
-                {mode === 'sign-up' ? (
-                  <>
-                    Already have an account?{' '}
-                    <button
-                      type="button"
-                      onClick={() => setMode('sign-in')}
-                      className="text-white underline hover:text-white/80"
-                    >
-                      Sign in
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    Don&apos;t have an account?{' '}
-                    <button
-                      type="button"
-                      onClick={() => setMode('sign-up')}
-                      className="text-white underline hover:text-white/80"
-                    >
-                      Sign up
-                    </button>
-                  </>
-                )}
-              </p>
 
               <p className="text-center text-xs text-white/30">
                 By continuing, you agree to our{' '}
@@ -331,13 +163,7 @@ export default function AuthModal({ mode: initialMode, onClose, redirectTo = '/s
 
           {/* Image Side */}
           <div className="relative hidden md:block">
-            <Image
-              src={randomImage}
-              alt="Gemstone"
-              fill
-              className="object-cover"
-              sizes="50vw"
-            />
+            <Image src={randomImage} alt="Gemstone" fill className="object-cover" sizes="50vw" />
             <div className="absolute inset-0 bg-gradient-to-l from-transparent to-black/50" />
           </div>
         </div>

@@ -39,7 +39,9 @@ export default function UserOrders() {
       setIsLoading(true);
       setError(null);
       const { store } = await import('@/lib/store');
-      const { orders: ordersList } = await store.orders.list(user.id);
+      // No customer id is passed: QuickDash fixes whose orders these are from
+      // the signed-in session, so there is no parameter to get wrong.
+      const { orders: ordersList } = await store.orders.list();
 
       setOrders(
         ordersList.map((o) => ({

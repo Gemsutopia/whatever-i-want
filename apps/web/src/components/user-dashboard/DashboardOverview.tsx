@@ -41,7 +41,8 @@ export default function DashboardOverview({ onNavigate }: DashboardOverviewProps
       setLoading(true);
       setLoadError(false);
       try {
-        const orderData = await store.orders.list(user.id, { limit: 3 });
+        // Whose orders comes from the session, never from a parameter.
+        const orderData = await store.orders.list({ limit: 3 });
         if (cancelled) return;
         setOrders(
           orderData.orders.map((order) => ({

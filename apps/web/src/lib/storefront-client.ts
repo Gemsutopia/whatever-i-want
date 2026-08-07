@@ -3,6 +3,10 @@ import {
   type QuickCatalogAvailability,
   type QuickCatalogItem,
   type QuickCatalogVariant,
+  type QuickCheckoutInput,
+  type QuickCheckoutItem,
+  type QuickCheckoutResult,
+  type QuickShippingQuote,
 } from '@quickengine/quick/browser';
 
 /**
@@ -259,12 +263,43 @@ export type Review = {
   };
 };
 
-export type Discount = {
-  code: string | null;
-  type: string;
-  value: number;
-  discountAmount: number;
-  name: string;
+/**
+ * QuickDash's authoritative answer about a discount code.
+ *
+ * Every figure is in cents and comes from the server pricing the real basket.
+ * There is deliberately no `type`/`value` pair here: what the rule IS belongs to
+ * the operator in QuickDash, and a storefront that recomputed `percentage × my
+ * subtotal` would eventually disagree with the charge.
+ */
+export type QuickDiscountPreview =
+  | {
+      valid: true;
+      code: string;
+      subtotalCents: number;
+      discountCents: number;
+      totalAfterDiscountCents: number;
+      currency: string;
+    }
+  | { valid: false; reason: string; message: string };
+
+/**
+ * No `unread` flag, deliberately. QuickDash tracks read state per MESSAGE
+ * (`readByCustomerAt`) and its conversation list does not aggregate it, so a
+ * badge here would be the storefront guessing. Opening a thread calls
+ * `messages.markRead`, which is what actually clears it.
+ */
+export type CustomerConversation = {
+  id: string;
+  subject: string;
+  status: 'open' | 'closed';
+  lastMessageAt: string;
+};
+
+export type ConversationMessage = {
+  id: string;
+  sender: 'customer' | 'operator';
+  body: string;
+  createdAt: string;
 };
 
 export type Pagination = {
@@ -347,6 +382,99 @@ const cents = (value: number | null | undefined): string => ((value ?? 0) / 100)
 const flattenCategories = <T extends { children?: T[] }>(items: T[]): T[] =>
   items.flatMap((item) => [item, ...flattenCategories(item.children ?? [])]);
 
+/**
+ * QuickDash returns the whole order row, and its typed surface covers the common
+ * columns while leaving the rest as `unknown`. These two readers pull the extra
+ * ones — tax, shipping, discount, ship-to — without an `any` cast per field.
+ */
+const numberField = (record: Record<string, unknown>, key: string): number =>
+  typeof record[key] === 'number' ? (record[key] as number) : 0;
+
+const stringField = (record: Record<string, unknown>, key: string): string | null =>
+  typeof record[key] === 'string' && record[key] !== '' ? (record[key] as string) : null;
+
+type QuickShipmentSummary = {
+  status: string;
+  carrier: string | null;
+  trackingNumber: string | null;
+  trackingUrl: string | null;
+  shippedAt: string | null;
+  deliveredAt: string | null;
+};
+
+/**
+ * A QuickDash order in the shape Gemsutopia's pages already render.
+ *
+ * ⚠️ Money crosses as integer cents and is formatted here, once. The prototype
+ * passed decimal strings the browser then parsed with `Number()`, which is how a
+ * total could drift a penny between the order page and the receipt.
+ *
+ * Dispatch and delivery dates come from the SHIPMENT, not the order: an order is
+ * "confirmed" the moment it is paid, and only its shipment knows when it left.
+ */
+function mapQuickOrder(
+  order: Record<string, unknown> & {
+    id: string;
+    number: string;
+    status: string;
+    currency: string;
+    subtotalCents: number;
+    totalCents: number;
+    createdAt: string;
+  },
+  shipment?: QuickShipmentSummary | null
+): Order {
+  return {
+    id: order.id,
+    orderNumber: order.number,
+    status: order.status,
+    subtotal: cents(order.subtotalCents),
+    taxAmount: cents(numberField(order, 'taxCents')),
+    shippingAmount: cents(numberField(order, 'shippingCents')),
+    total: cents(order.totalCents),
+    trackingNumber: shipment?.trackingNumber ?? null,
+    trackingUrl: shipment?.trackingUrl ?? null,
+    createdAt: order.createdAt,
+    shippedAt: shipment?.shippedAt ?? null,
+    deliveredAt: shipment?.deliveredAt ?? null,
+    currency: order.currency,
+  };
+}
+
+const mapConversation = (row: {
+  id: string;
+  subject: string;
+  status: string;
+  lastMessageAt: string;
+}): CustomerConversation => ({
+  id: row.id,
+  subject: row.subject,
+  status: row.status === 'closed' ? 'closed' : 'open',
+  lastMessageAt: row.lastMessageAt,
+});
+
+/** The delivery address as it was snapshotted onto the order at checkout. */
+function mapShipTo(order: Record<string, unknown>): Address | null {
+  const line1 = stringField(order, 'shipToLine1');
+  if (!line1) return null;
+  const name = stringField(order, 'shipToName') ?? '';
+  const [firstName, ...rest] = name.split(' ');
+  return {
+    id: '',
+    firstName: firstName ?? '',
+    lastName: rest.join(' '),
+    company: null,
+    addressLine1: line1,
+    addressLine2: stringField(order, 'shipToLine2'),
+    city: stringField(order, 'shipToCity') ?? '',
+    state: stringField(order, 'shipToRegion') ?? '',
+    postalCode: stringField(order, 'shipToPostalCode') ?? '',
+    country: stringField(order, 'shipToCountryCode') ?? '',
+    phone: null,
+    isDefault: null,
+  };
+}
+
 // ============================================
 // Client
 // ============================================
@@ -354,16 +482,26 @@ const flattenCategories = <T extends { children?: T[] }>(items: T[]): T[] =>
 export class StorefrontClient {
   private apiKey: string;
   private baseUrl: string;
+  private workspaceId: string;
   private customerToken: string | null = null;
   private quick: ReturnType<typeof createQuickConnect>;
 
   constructor(config: StorefrontConfig) {
     this.apiKey = config.apiKey;
     this.baseUrl = config.baseUrl?.replace(/\/$/, '') || 'https://api.quickdash.xyz';
-    this.quick = createQuickConnect({
+    this.workspaceId = config.workspaceId;
+    this.quick = this.createQuickClient();
+  }
+
+  private createQuickClient(customerSession?: string) {
+    return createQuickConnect({
       baseUrl: this.baseUrl,
-      workspaceId: config.workspaceId,
-      credential: { type: 'site', key: config.apiKey },
+      workspaceId: this.workspaceId,
+      credential: {
+        type: 'site',
+        key: this.apiKey,
+        ...(customerSession ? { customerSession } : {}),
+      },
     });
   }
 
@@ -372,6 +510,7 @@ export class StorefrontClient {
    */
   setCustomerToken(token: string | null) {
     this.customerToken = token;
+    this.quick = this.createQuickClient(token ?? undefined);
   }
 
   /**
@@ -719,35 +858,50 @@ export class StorefrontClient {
   // ============================================
 
   auth = {
-    register: async (data: {
-      email: string;
-      password: string;
-      name: string;
-      phone?: string;
-    }): Promise<AuthResponse> => {
-      const response = await this.request<AuthResponse>('/auth/register', {
-        method: 'POST',
-        body: data,
-      });
-      this.customerToken = response.token;
-      return response;
+    requestSignInLink: async (email: string, callbackUrl?: string): Promise<{ sent: true }> => {
+      const response = await this.quick.customer.requestSignInLink(email, callbackUrl);
+      return response.data;
     },
 
-    login: async (data: { email: string; password: string }): Promise<AuthResponse> => {
-      const response = await this.request<AuthResponse>('/auth/login', {
-        method: 'POST',
-        body: data,
-      });
-      this.customerToken = response.token;
-      return response;
+    verifySignInLink: async (token: string) => {
+      const response = await this.quick.customer.verifySignInLink(token);
+      this.setCustomerToken(response.data.token);
+      return response.data;
     },
 
-    logout: () => {
-      this.customerToken = null;
+    logout: async () => {
+      if (this.customerToken) await this.quick.customer.signOut();
+      this.setCustomerToken(null);
     },
 
-    getProfile: async (): Promise<{ user: Customer }> => {
-      return this.request('/auth/me');
+    /**
+     * A one-use ticket for sending this signed-in shopper to the hosted portal.
+     *
+     * 🔴 NEVER send `customerToken` itself to the portal — not in the URL, not in
+     * a cookie on a shared parent domain, not by `postMessage`. That token is
+     * this storefront's session; putting it on a second origin means a leak on
+     * either compromises both, and signing out here could not revoke it there.
+     *
+     * This ticket lives for about a minute, works exactly once, and buys the
+     * portal a separate session of its own.
+     */
+    requestPortalHandoff: async (): Promise<{ token: string; expiresAt: string }> => {
+      const response = await this.quick.customer.requestPortalHandoff();
+      return response.data;
+    },
+
+    getProfile: async () => {
+      const response = await this.quick.customer.me();
+      return {
+        user: {
+          id: response.data.customerId,
+          email: response.data.email,
+          name: response.data.email.split('@')[0] || 'Customer',
+          phone: null,
+          image: null,
+          addresses: [],
+        } as Customer,
+      };
     },
 
     updateProfile: async (data: {
@@ -798,92 +952,75 @@ export class StorefrontClient {
   // Orders
   // ============================================
 
+  /**
+   * The signed-in shopper's OWN orders.
+   *
+   * 🔴 Note what is missing: no `customerId` parameter, on any of these. The
+   * prototype's `/orders?customer_id=…` trusted the browser to say whose orders
+   * it wanted, so changing one query value read a stranger's purchase history.
+   * QuickDash fixes the client record from the customer SESSION in middleware —
+   * there is no parameter to tamper with, and a verified customer with no
+   * records gets an empty list rather than an unfiltered one.
+   *
+   * `create` is gone too: an order is now born inside `checkout.create`, in the
+   * same transaction that prices it. Nothing may post an order from a browser.
+   */
   orders = {
-    track: async (
-      orderNumber: string,
-      email: string
-    ): Promise<{
-      order: Order & {
-        paymentStatus?: string;
-        estimatedDelivery?: string | null;
-        carrier?: string | null;
-        shippingMethod?: string | null;
-        shippingDestination?: string | null;
-      };
-    }> => {
-      return this.request('/orders/track', {
-        params: { order_number: orderNumber, email },
+    list: async (options?: {
+      limit?: number;
+      cursor?: string;
+    }): Promise<{ orders: Order[]; pagination: Pagination }> => {
+      const result = await this.quick.customer.listOrders({
+        ...(options?.limit ? { limit: options.limit } : {}),
+        ...(options?.cursor ? { cursor: options.cursor } : {}),
+        direction: 'desc',
       });
-    },
-
-    list: async (
-      customerId: string,
-      options?: {
-        page?: number;
-        limit?: number;
-        status?: string;
-      }
-    ): Promise<{ orders: Order[]; pagination: Pagination }> => {
-      return this.request('/orders', {
-        params: {
-          customer_id: customerId,
-          page: options?.page,
-          limit: options?.limit,
-          status: options?.status,
+      const orders = result.data.items.map((order) => mapQuickOrder(order));
+      return {
+        orders,
+        pagination: {
+          page: 1,
+          limit: options?.limit ?? orders.length,
+          totalCount: orders.length,
+          totalPages: 1,
+          hasMore: Boolean(result.data.page?.nextCursor),
         },
-      });
+      };
     },
 
     get: async (orderId: string): Promise<{ order: OrderDetail }> => {
-      return this.request(`/orders/${orderId}`);
-    },
-
-    create: async (data: {
-      customer: { email: string; firstName: string; lastName: string; phone?: string };
-      shippingAddress: {
-        addressLine1: string;
-        addressLine2?: string;
-        city: string;
-        state: string;
-        postalCode: string;
-        country: string;
-        phone?: string;
-        firstName?: string;
-        lastName?: string;
+      const result = await this.quick.customer.getOrder(orderId);
+      const detail = result.data;
+      // The newest shipment is the one a customer means by "where is my order".
+      const shipment = detail.shipments?.[0] ?? null;
+      return {
+        order: {
+          ...mapQuickOrder(detail, shipment),
+          discountAmount: cents(numberField(detail, 'discountCents')),
+          customerNotes: detail.notes,
+          items: (detail.lineItems ?? []).map((line) => ({
+            id: line.id,
+            productName: line.name,
+            variantName: stringField(line, 'variantName'),
+            sku: stringField(line, 'sku'),
+            unitPrice: cents(line.unitPriceCents),
+            quantity: line.quantity,
+            totalPrice: cents(line.lineTotalCents),
+          })),
+          shippingAddress: mapShipTo(detail),
+          // QuickDash bills to the payment instrument, so it stores no separate
+          // billing address. Showing the shipping address twice would be a lie.
+          billingAddress: null,
+          payment: detail.payment
+            ? {
+                status: detail.payment.status,
+                method: detail.payment.provider,
+                provider: detail.payment.provider,
+                currency: detail.payment.currency,
+              }
+            : null,
+        },
       };
-      items: {
-        name: string;
-        price: number;
-        quantity: number;
-        productId?: string;
-        variantId?: string;
-        sku?: string;
-        image?: string;
-      }[];
-      payment: {
-        provider: string;
-        method: string;
-        externalId?: string;
-        amount: string | number;
-        currency: string;
-        status?: string;
-        session_id?: string;
-        captureID?: string;
-        checkoutId?: string;
-        orderId?: string;
-        paymentLinkId?: string;
-        txHash?: string;
-        walletAddress?: string;
-        chain?: string;
-      };
-      totals: { subtotal: number; discount: number; tax: number; shipping: number; total: number };
-      discountCode?: unknown;
-      metadata?: Record<string, unknown>;
-    }): Promise<{ order: { id: string; orderNumber: string; status: string } }> => {
-      return this.request('/orders', {
-        method: 'POST',
-        body: data,
-      });
     },
   };
 
@@ -892,18 +1029,49 @@ export class StorefrontClient {
   // ============================================
 
   checkout = {
-    create: async (data: {
-      customerId: string;
-      items: { variantId: string; quantity: number }[];
-      shippingAddress: Omit<Address, 'id' | 'isDefault'>;
-      billingAddress?: Omit<Address, 'id' | 'isDefault'>;
-      customerNotes?: string;
-      metadata?: Record<string, unknown>;
-    }): Promise<{ order: Order & { items: unknown[] } }> => {
-      return this.request('/checkout', {
-        method: 'POST',
-        body: data,
-      });
+    /**
+     * Create the order and start its payment, in one server-authoritative call.
+     *
+     * 🔴 This replaces THREE prototype calls that used to run in a fragile order:
+     * `payments.createPayPalOrder` → provider approval → `orders.create`. Under
+     * that shape the order only existed AFTER the money moved, so a browser that
+     * closed on the return trip left a real charge with no order behind it — the
+     * "payment was successful, but we could not finish recording the order" path
+     * the old checkout had to apologise for.
+     *
+     * QuickDash writes the order, its idempotency record, its audit entry and its
+     * outbox message in one transaction, then opens the payment against that
+     * order. `externalPaymentId` comes back already linked, so settlement always
+     * has somewhere to land.
+     *
+     * ⚠️ No price, subtotal, tax, discount or currency is sent. Only the CODE for
+     * a discount and the ID of a rate the server itself offered. Everything else
+     * is priced from the catalog.
+     */
+    create: async (
+      input: QuickCheckoutInput,
+      idempotencyKey: string
+    ): Promise<QuickCheckoutResult> => {
+      const result = await this.quick.site.checkout(input, idempotencyKey);
+      return result.data;
+    },
+
+    /**
+     * Settle a payment the shopper approved at the provider.
+     *
+     * Safe to call twice: QuickDash keys settlement on the provider's payment id,
+     * so a refreshed return page confirms the same order rather than charging
+     * again. Completing the referral reward is part of this call, which is why
+     * the prototype's separate `/referrals/apply` request is gone.
+     */
+    capture: async (
+      externalPaymentId: string
+    ): Promise<{
+      captured: true;
+      settlement: { applied: boolean; reason?: string; orderId?: string };
+    }> => {
+      const result = await this.quick.site.capture(externalPaymentId);
+      return result.data;
     },
   };
 
@@ -912,77 +1080,24 @@ export class StorefrontClient {
   // ============================================
 
   payments = {
-    getMethods: async (): Promise<{
-      methods: PaymentMethod[];
-      currency: string;
-      acceptedCurrencies: string[];
-    }> => {
-      const result = await this.request<{
-        methods: PaymentMethod[];
-        currency: string;
-        acceptedCurrencies: string[];
-      }>('/payments/methods');
-
-      if (result.methods?.length) {
-        return result;
-      }
-
-      const siteResult = await this.request<{ site: SiteSettings }>('/site');
-      if (siteResult.site.payments?.methods?.length) {
-        return siteResult.site.payments;
-      }
-
-      return result;
-    },
-
-    createPayPalOrder: async (data: {
-      items: {
-        variantId: string;
-        quantity: number;
-      }[];
-      successUrl?: string;
-      cancelUrl?: string;
-      country: string;
-      state?: string;
-      discountCode?: string;
-      customerEmail?: string;
-      checkoutAttemptId?: string;
-    }): Promise<{
-      orderId: string;
-      approveUrl: string;
-      quote: {
-        currency: string;
-        subtotal: number;
-        shippingAmount: number;
-        discountAmount: number;
-        total: number;
-        items: Array<{
-          variantId: string;
-          productId: string;
-          name: string;
-          quantity: number;
-          unitAmount: number;
-        }>;
-      };
-    }> => {
-      return this.request('/payments/paypal/checkout', {
-        method: 'POST',
-        body: data,
-      });
-    },
-
-    capturePayPalOrder: async (
-      orderId: string
-    ): Promise<{
-      captureId: string;
-      status: string;
-      payer: unknown;
-      shippingAddress: unknown;
-    }> => {
-      return this.request('/payments/paypal/checkout', {
-        method: 'POST',
-        body: { orderId },
-      });
+    /**
+     * Whether this workspace can take money at all.
+     *
+     * ⚠️ Deliberately thin, and deliberately NOT a list of card brands. The
+     * prototype's `/payments/methods` let the browser learn the provider before
+     * checkout and then send that provider back as part of the order, which made
+     * a client-supplied string decide where money went.
+     *
+     * QuickDash names the provider in the checkout RESPONSE instead
+     * (`payment.provider` and `payment.nextAction`), so it is chosen by the
+     * workspace's connected account and never by the page. All this call answers
+     * is the question the payment step needs beforehand: is the payments module
+     * switched on? If no account is connected, `checkout.create` says so in
+     * `paymentUnavailableReason` and the shopper sees the real reason.
+     */
+    isAvailable: async (): Promise<boolean> => {
+      const result = await this.quick.site.context();
+      return result.data.modules.includes('payments');
     },
   };
 
@@ -991,14 +1106,24 @@ export class StorefrontClient {
   // ============================================
 
   discounts = {
-    validate: async (
-      code: string,
-      subtotal?: number
-    ): Promise<{ valid: boolean; discount: Discount }> => {
-      return this.request('/discounts/validate', {
-        method: 'POST',
-        body: { code, subtotal },
-      });
+    /**
+     * What a code is actually worth against the real basket.
+     *
+     * Replaces the prototype `/api/storefront/discounts/validate`, which took a
+     * browser-supplied `subtotal`. That let anyone claim a $10,000 order to clear
+     * a minimum-spend threshold, or take a percentage off a number they invented.
+     * QuickDash now prices the same items it would price at checkout, so the
+     * preview and the charge cannot disagree.
+     *
+     * An expired or unknown code comes back `valid: false` with a shopper-facing
+     * message — it is a normal answer, not a thrown error.
+     */
+    preview: async (input: {
+      code: string;
+      items: QuickCheckoutItem[];
+    }): Promise<QuickDiscountPreview> => {
+      const result = await this.quick.site.previewDiscount(input);
+      return result.data;
     },
   };
 
@@ -1071,20 +1196,27 @@ export class StorefrontClient {
   // ============================================
 
   shipping = {
-    getRates: async (data: {
-      country: string;
-      state?: string;
-      weight?: number;
-      subtotal?: number;
-    }): Promise<{
-      rates: ShippingRate[];
-      freeShippingThreshold: number | null;
-      freeShippingApplied: boolean;
-    }> => {
-      return this.request('/shipping/rates', {
-        method: 'POST',
-        body: data,
-      });
+    /**
+     * Server-priced shipping options for the real cart.
+     *
+     * Replaces the prototype `/api/storefront/shipping/rates` call. The old one
+     * took a client-computed subtotal and no items, so the browser decided both
+     * the billable weight and whether shipping was free. QuickDash now prices
+     * from the actual items and resolves `discountCode` itself, which is why
+     * free shipping is an `option.free` flag coming back rather than a branch
+     * the checkout takes before asking.
+     */
+    quote: async (input: {
+      items: QuickCheckoutItem[];
+      destination: {
+        countryCode: string;
+        regionCode?: string;
+        postalCode?: string;
+      };
+      discountCode?: string;
+    }): Promise<QuickShippingQuote> => {
+      const result = await this.quick.site.quoteShipping(input);
+      return result.data;
     },
   };
 
@@ -1094,21 +1226,39 @@ export class StorefrontClient {
 
   wishlist = {
     list: async (): Promise<{ wishlist: WishlistItem[] }> => {
-      return this.request('/wishlist');
+      const result = await this.quick.customer.listWishlist();
+      return {
+        wishlist: result.data.items.map((item) => ({
+          id: item.catalogItemId,
+          addedAt: item.addedAt,
+          product: {
+            id: item.catalogItemId,
+            name: item.name,
+            slug: item.catalogItemId,
+            price: cents(item.priceCents),
+            thumbnail: null,
+            images: null,
+            isActive: item.status === 'active',
+          },
+        })),
+      };
     },
 
     add: async (productId: string): Promise<{ success: boolean }> => {
-      return this.request('/wishlist', {
-        method: 'POST',
-        body: { productId },
-      });
+      await this.quick.customer.saveWishlistItem({ catalogItemId: productId });
+      return { success: true };
     },
 
     remove: async (productId: string): Promise<{ success: boolean }> => {
-      return this.request('/wishlist', {
-        method: 'DELETE',
-        params: { productId },
-      });
+      await this.quick.customer.removeWishlistItem(productId);
+      return { success: true };
+    },
+
+    merge: async (productIds: string[]): Promise<{ merged: number }> => {
+      const result = await this.quick.customer.mergeWishlist(
+        productIds.map((catalogItemId) => ({ catalogItemId }))
+      );
+      return result.data;
     },
   };
 
@@ -1128,13 +1278,32 @@ export class StorefrontClient {
       summary: { averageRating: number | null; totalReviews: number };
       pagination: Pagination;
     }> => {
-      return this.request('/reviews', {
-        params: {
-          productId,
-          page: options?.page,
-          limit: options?.limit,
+      const limit = options?.limit ?? 50;
+      const result = await this.quick.catalog.listReviews(productId, limit);
+      const reviews = result.data.items.map((review) => ({
+        id: review.id,
+        rating: review.rating,
+        title: review.title,
+        body: review.body,
+        isVerifiedPurchase: review.verifiedPurchase,
+        helpfulCount: 0,
+        createdAt: review.createdAt,
+        author: { name: review.authorName, image: null },
+      }));
+      const averageRating = reviews.length
+        ? reviews.reduce((sum, review) => sum + review.rating, 0) / reviews.length
+        : null;
+      return {
+        reviews,
+        summary: { averageRating, totalReviews: reviews.length },
+        pagination: {
+          page: options?.page ?? 1,
+          limit,
+          totalCount: reviews.length,
+          totalPages: reviews.length ? 1 : 0,
+          hasMore: false,
         },
-      });
+      };
     },
 
     create: async (data: {
@@ -1143,10 +1312,25 @@ export class StorefrontClient {
       title?: string;
       body?: string;
     }): Promise<{ review: Review; message: string }> => {
-      return this.request('/reviews', {
-        method: 'POST',
-        body: data,
+      const result = await this.quick.customer.createReview({
+        catalogItemId: data.productId,
+        rating: data.rating,
+        title: data.title,
+        body: data.body,
       });
+      return {
+        review: {
+          id: result.data.id,
+          rating: data.rating,
+          title: data.title ?? null,
+          body: data.body ?? null,
+          isVerifiedPurchase: result.data.verifiedPurchase,
+          helpfulCount: 0,
+          createdAt: new Date().toISOString(),
+          author: { name: 'You', image: null },
+        },
+        message: 'Your review is awaiting approval.',
+      };
     },
   };
 
@@ -1208,6 +1392,71 @@ export class StorefrontClient {
         method: 'POST',
         body: data,
       });
+    },
+  };
+
+  // ============================================
+  // Private customer conversations
+  // ============================================
+
+  /**
+   * The shopper's private thread with the business.
+   *
+   * Two-way and durable: the customer writes here, the operator answers from
+   * QuickDash's conversation view, and both sides read the same thread. This is
+   * not the public contact form — `contact.submit` is a one-shot message from
+   * anyone, while these require a verified customer session and are attached to
+   * that customer forever.
+   *
+   * ⚠️ Every method is scoped by the SESSION's `workspaceCustomerId` inside
+   * QuickDash. A conversation id belonging to somebody else answers 404, not the
+   * thread, so guessing an id reveals nothing.
+   */
+  messages = {
+    list: async (): Promise<{ conversations: CustomerConversation[] }> => {
+      const result = await this.quick.customer.listMessages();
+      return { conversations: result.data.items.map(mapConversation) };
+    },
+
+    get: async (
+      conversationId: string
+    ): Promise<{
+      conversation: CustomerConversation & { messages: ConversationMessage[] };
+    }> => {
+      const result = await this.quick.customer.getMessage(conversationId);
+      const messages = Array.isArray(result.data.messages) ? result.data.messages : [];
+      return {
+        conversation: {
+          ...mapConversation(result.data),
+          messages: messages.map((message) => {
+            const record = message as Record<string, unknown>;
+            return {
+              id: String(record.id ?? ''),
+              // "customer" or "operator" — who is speaking decides which side of
+              // the thread the bubble sits on.
+              sender: record.sender === 'operator' ? 'operator' : 'customer',
+              body: String(record.body ?? ''),
+              createdAt: String(record.createdAt ?? ''),
+            };
+          }),
+        },
+      };
+    },
+
+    start: async (
+      subject: string,
+      body: string
+    ): Promise<{ conversation: CustomerConversation }> => {
+      const result = await this.quick.customer.createMessage(subject, body);
+      return { conversation: mapConversation(result.data) };
+    },
+
+    reply: async (conversationId: string, body: string): Promise<void> => {
+      await this.quick.customer.replyToMessage(conversationId, body);
+    },
+
+    markRead: async (conversationId: string): Promise<void> => {
+      await this.quick.customer.markMessageRead(conversationId);
     },
   };
 
@@ -1298,55 +1547,27 @@ export class StorefrontClient {
 
   referrals = {
     generate: async (email: string): Promise<{ referral: unknown }> => {
-      return this.request('/referrals', {
-        method: 'POST',
-        body: { email },
-      });
+      void email;
+      const result = await this.quick.customer.createReferral();
+      return { referral: { code: result.data.code } };
     },
 
-    validate: async (
-      code: string,
-      customerEmail?: string,
-      orderTotal?: number
-    ): Promise<{
-      valid: boolean;
-      error?: string;
-      discount?: {
-        code: string;
-        type: string;
-        value: number;
-        amount: number;
-        free_shipping: boolean;
-        isReferral: boolean;
-        referralId: string;
-        referrerName: string;
-        description: string;
-      };
-    }> => {
-      return this.request('/referrals/validate', {
-        method: 'POST',
-        body: { code, customerEmail, orderTotal },
-      });
-    },
-
-    apply: async (data: {
-      referralId: string;
-      orderId: string;
-      orderTotal: number;
-      discountApplied: number;
-      referredEmail: string;
-      referredName: string;
-    }): Promise<{ success: boolean; referral?: unknown }> => {
-      return this.request('/referrals/apply', {
-        method: 'POST',
-        body: data,
-      });
-    },
-
+    /**
+     * There is deliberately no `validate` or `apply` here any more.
+     *
+     * The prototype treated a referral code as a kind of discount the browser
+     * validated up front and then "applied" in a second call after the order
+     * existed — which could silently fail and lose the referrer their reward.
+     *
+     * QuickDash separates the two. A referral records WHO BROUGHT this customer
+     * and never changes what the order costs, so the code is passed to
+     * `checkout.create` as `referralCode` and evaluated inside the same request
+     * that prices the sale. The reward is then completed by payment capture.
+     */
     get: async (email: string): Promise<{ referral: unknown | null }> => {
-      return this.request('/referrals', {
-        params: { email },
-      });
+      void email;
+      const result = await this.quick.customer.getReferral();
+      return { referral: result.data.referral };
     },
   };
 

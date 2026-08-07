@@ -1,5 +1,5 @@
 'use client';
-import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { createContext, ReactNode, useContext, useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { useBetterAuth } from '@/contexts/BetterAuthContext';
 import { store } from '@/lib/store';
@@ -62,8 +62,12 @@ export function WishlistProvider({ children }: { children: ReactNode }) {
 
     const syncFromServer = async () => {
       try {
+        const localItems = items;
+        if (localItems.length > 0) {
+          await store.wishlist.merge(localItems.map((item) => item.id));
+        }
         const { wishlist } = await store.wishlist.list();
-        const serverItems: WishlistItem[] = wishlist.map(item => ({
+        const serverItems: WishlistItem[] = wishlist.map((item) => ({
           id: item.product.id,
           name: item.product.name,
           price: Number.parseFloat(item.product.price),
@@ -71,12 +75,9 @@ export function WishlistProvider({ children }: { children: ReactNode }) {
           stock: item.product.isActive === false ? 0 : undefined,
         }));
 
-        setItems(prev => {
-          const serverIds = new Set(serverItems.map(i => i.id));
-          const localOnly = prev.filter(i => !serverIds.has(i.id));
-          void Promise.allSettled(localOnly.map(item => store.wishlist.add(item.id)));
-          return [...serverItems, ...localOnly];
-        });
+        setItems((prev) =>
+          serverItems.map((item) => prev.find((local) => local.id === item.id) ?? item)
+        );
 
         setHasSynced(true);
       } catch {
@@ -103,8 +104,8 @@ export function WishlistProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    setItems(prev => {
-      const exists = prev.find(i => i.id === item.id);
+    setItems((prev) => {
+      const exists = prev.find((i) => i.id === item.id);
       if (exists) {
         return prev;
       }
@@ -118,7 +119,7 @@ export function WishlistProvider({ children }: { children: ReactNode }) {
   };
 
   const removeItem = (id: string) => {
-    setItems(prev => prev.filter(item => item.id !== id));
+    setItems((prev) => prev.filter((item) => item.id !== id));
     if (user) {
       void store.wishlist.remove(id).catch(() => {
         toast.error('Could not update your account wishlist');
@@ -128,14 +129,14 @@ export function WishlistProvider({ children }: { children: ReactNode }) {
 
   const clearWishlist = () => {
     if (user) {
-      void Promise.allSettled(items.map(item => store.wishlist.remove(item.id)));
+      void Promise.allSettled(items.map((item) => store.wishlist.remove(item.id)));
     }
     setItems([]);
   };
 
   const removeSoldOutItems = () => {
     const soldOutItems = items.filter(
-      item =>
+      (item) =>
         (item.inventory !== undefined && item.inventory === 0) ||
         (item.stock !== undefined && item.stock === 0)
     );
@@ -146,14 +147,14 @@ export function WishlistProvider({ children }: { children: ReactNode }) {
           ? 'Wishlist item sold out'
           : `${soldOutItems.length} wishlist items sold out`,
         {
-          description: soldOutItems.map(i => i.name).join(', '),
+          description: soldOutItems.map((i) => i.name).join(', '),
         }
       );
     }
 
-    setItems(prev =>
+    setItems((prev) =>
       prev.filter(
-        item =>
+        (item) =>
           !(
             (item.inventory !== undefined && item.inventory === 0) ||
             (item.stock !== undefined && item.stock === 0)
@@ -163,7 +164,7 @@ export function WishlistProvider({ children }: { children: ReactNode }) {
   };
 
   const isInWishlist = (id: string) => {
-    return items.some(item => item.id === id);
+    return items.some((item) => item.id === id);
   };
 
   const itemCount = items.length;

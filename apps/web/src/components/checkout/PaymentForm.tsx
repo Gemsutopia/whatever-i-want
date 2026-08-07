@@ -4,28 +4,71 @@ import { IconBrandPaypal, IconLock } from '@tabler/icons-react';
 import { useState } from 'react';
 import { store } from '@/lib/store';
 
+export interface CheckoutCustomerData {
+  email: string;
+  firstName: string;
+  lastName: string;
+  address: string;
+  apartment?: string;
+  city: string;
+  state: string;
+  zipCode: string;
+  country: string;
+  phone?: string;
+}
+
+export interface CheckoutCartItem {
+  id: string;
+  variantId?: string;
+  quantity: number;
+  name?: string;
+  price?: number;
+  image?: string;
+  sku?: string;
+}
+
+/**
+ * QuickDash returns the whole order row; its typed surface covers the common
+ * columns and leaves the rest as `unknown`. Tax, shipping and discount are read
+ * through here rather than with a cast at each site.
+ */
+const readCents = (order: Record<string, unknown>, key: string): number =>
+  typeof order[key] === 'number' ? (order[key] as number) : 0;
+
+/** What the confirmation screen reads after the shopper returns from PayPal. */
+export interface StoredCheckout {
+  orderId: string;
+  orderNumber: string;
+  externalPaymentId: string;
+  provider: string;
+  receipt: {
+    currency: string;
+    subtotalCents: number;
+    totalCents: number;
+    shippingCents: number;
+    discountCents: number;
+    taxCents: number;
+    lines: Array<{ id: string; name: string; quantity: number; unitPriceCents: number }>;
+  };
+  customerData: CheckoutCustomerData;
+}
+
 interface PaymentFormProps {
   paymentMethod: 'paypal';
+  /** Display total, in the currency the shopper is browsing in. */
   amount: number;
   currency: string;
-  customerData: any;
-  items: any[];
-  validationItems: any[];
-  appliedDiscount?: {
-    code: string;
-    type: 'percentage' | 'fixed_amount' | 'fixed';
-    value: number;
-    amount: number;
-    free_shipping: boolean;
-    isReferral?: boolean;
-    referralId?: string;
-    referrerName?: string;
-    description?: string;
-    discountCodeId?: string;
-  } | null;
-  subtotal: number;
-  shipping: number;
-  onSuccess: (data: { orderId: string; actualAmount?: number; currency?: string }) => void;
+  customerData: CheckoutCustomerData;
+  items: CheckoutCartItem[];
+  /** The catalog-currency total this page showed, in cents. See below. */
+  expectedTotalCents: number;
+  /** A discount code the shopper entered and QuickDash confirmed. */
+  discountCode: string | null;
+  /** A referral code carried in from a share link. Never changes the price. */
+  referralCode: string | null;
+  /** The id of a delivery rate QuickDash itself offered. */
+  shippingRateId: string;
+  countryCode: string;
   onError: (error: string) => void;
 }
 
@@ -33,8 +76,12 @@ export default function PaymentForm({
   amount,
   currency,
   customerData,
-  validationItems,
-  appliedDiscount,
+  items,
+  expectedTotalCents,
+  discountCode,
+  referralCode,
+  shippingRateId,
+  countryCode,
   onError,
 }: PaymentFormProps) {
   const [loading, setLoading] = useState(false);
@@ -42,83 +89,106 @@ export default function PaymentForm({
   const handleCheckout = async () => {
     setLoading(true);
     try {
-      const currentProducts = await Promise.all(
-        validationItems.map((item) => store.products.get(item.id))
+      /**
+       * One call creates the order AND opens its payment.
+       *
+       * 🔴 The idempotency key is generated once per attempt and sent with the
+       * request. A double-tapped button, or a retry after a dropped connection,
+       * returns the SAME order instead of making a second one — which is the
+       * difference between a slow network and being charged twice.
+       */
+      const idempotencyKey = crypto.randomUUID();
+      const { order, payment, paymentUnavailableReason } = await store.checkout.create(
+        {
+          items: items.map((item) => ({
+            catalogItemId: item.id,
+            ...(item.variantId ? { variantId: item.variantId } : {}),
+            quantity: item.quantity,
+          })),
+          email: customerData.email,
+          name: `${customerData.firstName} ${customerData.lastName}`.trim(),
+          ...(discountCode ? { discountCode } : {}),
+          ...(referralCode ? { referralCode } : {}),
+          shippingRateId,
+          shippingAddress: {
+            name: `${customerData.firstName} ${customerData.lastName}`.trim(),
+            line1: customerData.address,
+            line2: customerData.apartment || null,
+            city: customerData.city,
+            region: customerData.state,
+            postalCode: customerData.zipCode,
+            countryCode,
+          },
+        },
+        idempotencyKey
       );
 
-      for (let index = 0; index < validationItems.length; index += 1) {
-        const cartItem = validationItems[index];
-        const product = currentProducts[index].product;
-        const variant = cartItem.variantId
-          ? product.variants?.find((candidate) => candidate.id === cartItem.variantId)
-          : product.variants?.[0];
-        const currentPrice = Number(variant?.price || product.price);
-        const availableStock = product.stock?.length
-          ? cartItem.variantId
-            ? Math.max(
-                0,
-                product.stock.find((stock) => stock.variantId === cartItem.variantId)?.quantity ?? 0
-              )
-            : product.stock.reduce((total, stock) => total + Math.max(0, stock.quantity), 0)
-          : 0;
-
-        if (availableStock < cartItem.quantity) {
-          throw new Error(`${product.name} no longer has enough stock for this order.`);
-        }
-        if (
-          !Number.isFinite(currentPrice) ||
-          Math.abs(currentPrice - Number(cartItem.price)) > 0.009
-        ) {
-          throw new Error(`${product.name} has changed price. Return to your cart to review it.`);
-        }
+      if (!payment) {
+        throw new Error(
+          paymentUnavailableReason ??
+            'This store cannot take payments right now. Your order was not placed.'
+        );
       }
 
-      const origin = window.location.origin;
-      const checkoutAttemptId = crypto.randomUUID();
-      const data = await store.payments.createPayPalOrder({
-        items: validationItems.map((item) => ({
-          variantId: item.variantId,
-          quantity: item.quantity,
-        })),
-        successUrl: `${origin}/checkout?payment_method=paypal&status=success`,
-        cancelUrl: `${origin}/checkout?payment_method=paypal&status=cancelled`,
-        country: customerData.country === 'United States' ? 'US' : 'CA',
-        state: customerData.state,
-        discountCode: appliedDiscount?.code,
-        customerEmail: customerData.email,
-        checkoutAttemptId,
-      });
+      /**
+       * 🔴 The one check that has to happen on this side.
+       *
+       * QuickDash prices from the catalog, never from the page, which is exactly
+       * what stops a tampered basket. The flip side is that a price edited while
+       * this tab sat open produces a REAL total higher than the one the shopper
+       * read. Sending them to PayPal for a number they never agreed to would be
+       * the same wrong in the other direction, so the mismatch stops here and the
+       * unpaid order is simply left behind.
+       */
+      if (order.totalCents !== expectedTotalCents) {
+        throw new Error(
+          'Prices changed while you were checking out. Return to your cart to review the new total before paying.'
+        );
+      }
 
-      const authoritativeItems = data.quote.items.map((quotedItem) => {
-        const cartItem = validationItems.find((item) => item.variantId === quotedItem.variantId);
-        return {
-          ...cartItem,
-          id: quotedItem.productId,
-          variantId: quotedItem.variantId,
-          name: quotedItem.name,
-          price: quotedItem.unitAmount,
-          quantity: quotedItem.quantity,
-        };
-      });
+      if (payment.nextAction.type !== 'approval') {
+        throw new Error('This store’s payment provider is not supported by this checkout yet.');
+      }
 
+      /**
+       * What the return trip needs, taken from QUICKDASH'S order — not the page.
+       *
+       * The prototype stashed the browser's own items, prices and totals here and
+       * then built the order out of them afterwards, so whatever sessionStorage
+       * said became the sale. Here the order already exists server-side and
+       * settlement is keyed on `externalPaymentId`; these figures are a receipt
+       * snapshot for rendering, copied off the authoritative response.
+       *
+       * A guest has no customer session, so `/customer/orders/:id` is correctly
+       * closed to them on return — this snapshot is what the confirmation screen
+       * reads instead.
+       */
       sessionStorage.setItem(
-        'paypalCheckoutData',
+        'quickdashCheckout',
         JSON.stringify({
-          orderId: data.orderId,
-          checkoutAttemptId,
+          orderId: order.id,
+          orderNumber: order.number,
+          externalPaymentId: payment.externalPaymentId,
+          provider: payment.provider,
+          receipt: {
+            currency: order.currency,
+            subtotalCents: order.subtotalCents,
+            totalCents: order.totalCents,
+            shippingCents: readCents(order, 'shippingCents'),
+            discountCents: readCents(order, 'discountCents'),
+            taxCents: readCents(order, 'taxCents'),
+            lines: (order.lineItems ?? []).map((line) => ({
+              id: line.id,
+              name: line.name,
+              quantity: line.quantity,
+              unitPriceCents: line.unitPriceCents,
+            })),
+          },
           customerData,
-          items: authoritativeItems,
-          subtotal: data.quote.subtotal,
-          shipping: data.quote.shippingAmount,
-          appliedDiscount: appliedDiscount
-            ? { ...appliedDiscount, amount: data.quote.discountAmount }
-            : null,
-          amount: data.quote.total,
-          currency: data.quote.currency,
         })
       );
 
-      window.location.href = data.approveUrl;
+      window.location.href = payment.nextAction.approvalUrl;
     } catch (error) {
       onError(
         error instanceof Error

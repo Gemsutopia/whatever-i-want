@@ -1,7 +1,5 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import Link from 'next/link';
 import {
   IconBrandPaypal,
   IconCheck,
@@ -11,6 +9,8 @@ import {
   IconShieldCheck,
   IconTestPipe,
 } from '@tabler/icons-react';
+import Link from 'next/link';
+import { useEffect, useState } from 'react';
 import { useMode } from '@/lib/contexts/ModeContext';
 import { store } from '@/lib/store';
 
@@ -29,14 +29,24 @@ export default function PaymentMethods({ onSelect }: PaymentMethodsProps) {
   const isSandbox = siteMode === 'sandbox';
 
   useEffect(() => {
-    const fetchPayPal = async () => {
+    /**
+     * Ask only whether the store can take money at all.
+     *
+     * The prototype fetched a list of payment methods and let the browser learn
+     * the provider before checkout — which then travelled back as part of the
+     * order. QuickDash names the provider in the checkout RESPONSE instead, so
+     * the connected account decides, not the page. If nothing is connected,
+     * `checkout.create` returns `paymentUnavailableReason` and the shopper is
+     * told the real reason rather than meeting a dead button.
+     */
+    const checkAvailability = async () => {
       try {
         setLoading(true);
         setLoadError(false);
-        const response = await store.payments.getMethods();
-        const paypal = response.methods.find(method => method.provider === 'paypal');
-        setPaypalAvailable(Boolean(paypal));
-        setPaypalIsTest(paypal?.testMode === true || paypal?.mode === 'sandbox');
+        setPaypalAvailable(await store.payments.isAvailable());
+        // Sandbox is a property of the environment this build points at, not
+        // something a public endpoint should advertise per payment method.
+        setPaypalIsTest(isSandbox);
       } catch {
         setPaypalAvailable(false);
         setLoadError(true);
@@ -45,8 +55,8 @@ export default function PaymentMethods({ onSelect }: PaymentMethodsProps) {
       }
     };
 
-    fetchPayPal();
-  }, [retryKey]);
+    checkAvailability();
+  }, [retryKey, isSandbox]);
 
   if (loading) {
     return (
@@ -109,16 +119,24 @@ export default function PaymentMethods({ onSelect }: PaymentMethodsProps) {
         <input
           type="checkbox"
           checked={agreedToTerms}
-          onChange={event => setAgreedToTerms(event.target.checked)}
+          onChange={(event) => setAgreedToTerms(event.target.checked)}
           className="mt-0.5 h-4 w-4 shrink-0 rounded border-white/30 bg-transparent accent-white"
         />
         <span className="text-xs text-white/70 xs:text-sm">
           I agree to the{' '}
-          <Link href="/terms" target="_blank" className="underline underline-offset-2 hover:text-white">
+          <Link
+            href="/terms"
+            target="_blank"
+            className="underline underline-offset-2 hover:text-white"
+          >
             Terms of Service
           </Link>{' '}
           and{' '}
-          <Link href="/refund-policy" target="_blank" className="underline underline-offset-2 hover:text-white">
+          <Link
+            href="/refund-policy"
+            target="_blank"
+            className="underline underline-offset-2 hover:text-white"
+          >
             Refund Policy
           </Link>
         </span>
@@ -133,9 +151,15 @@ export default function PaymentMethods({ onSelect }: PaymentMethodsProps) {
       </button>
 
       <div className="space-y-2 border-t border-white/10 pt-4 text-xs text-white/50">
-        <div className="flex items-center gap-2"><IconLock size={14} /> Secure PayPal checkout</div>
-        <div className="flex items-center gap-2"><IconShieldCheck size={14} /> Your payment details stay with PayPal</div>
-        <div className="flex items-center gap-2"><IconMail size={14} /> Need help? support@gemsutopia.ca</div>
+        <div className="flex items-center gap-2">
+          <IconLock size={14} /> Secure PayPal checkout
+        </div>
+        <div className="flex items-center gap-2">
+          <IconShieldCheck size={14} /> Your payment details stay with PayPal
+        </div>
+        <div className="flex items-center gap-2">
+          <IconMail size={14} /> Need help? support@gemsutopia.ca
+        </div>
       </div>
     </div>
   );

@@ -30,8 +30,9 @@ export type {
   Address,
   Auction,
   Category,
+  ConversationMessage,
   Customer,
-  Discount,
+  CustomerConversation,
   FaqItem,
   Order,
   Product,
@@ -45,59 +46,37 @@ export type {
 } from './storefront-client';
 
 // ============================================
-// Usage Examples (delete this section later)
+// How a storefront uses this
 // ============================================
 
 /*
-// Fetch products
-const { products, pagination } = await store.products.list({
-  category: 'gemstones',
-  limit: 20,
-  sort: 'price',
-  order: 'asc'
-})
-
-// Get single product
+// ── Catalog ──────────────────────────────────────────────────────────────────
+const { products, pagination } = await store.products.list({ category: 'gemstones', limit: 20 })
 const { product } = await store.products.get('blue-sapphire')
 
-// Customer auth
-const { user, token } = await store.auth.login({
-  email: 'customer@example.com',
-  password: 'password123'
-})
-// Token is automatically stored, or save it to localStorage:
-localStorage.setItem('customerToken', token)
+// ── Identity ─────────────────────────────────────────────────────────────────
+// Passwordless. There is no password to take, store, leak or reset.
+await store.auth.requestSignInLink('customer@example.com', `${origin}/auth/verify`)
+// …the emailed link lands on /auth/verify with ?token=
+const { token } = await store.auth.verifySignInLink(tokenFromUrl)
+store.setCustomerToken(token)
 
-// On page load, restore token:
-const savedToken = localStorage.getItem('customerToken')
-if (savedToken) store.setCustomerToken(savedToken)
+// ── Buying ───────────────────────────────────────────────────────────────────
+// 1. Ask what a code is worth. The CART goes up, never a subtotal.
+const preview = await store.discounts.preview({ code: 'SAVE10', items })
+// 2. Ask what delivery costs. Every option comes back with a rateId.
+const quote = await store.shipping.quote({ items, destination })
+// 3. Create the order and open its payment, in one authoritative call.
+//    Send codes and ids only — never a price, total, tax or currency.
+const { order, payment } = await store.checkout.create(
+  { items, email, discountCode: 'SAVE10', shippingRateId: quote.options[0].rateId, shippingAddress },
+  idempotencyKey,
+)
+if (payment?.nextAction.type === 'approval') window.location.href = payment.nextAction.approvalUrl
+// 4. On return, settle it. Safe to call twice.
+await store.checkout.capture(payment.externalPaymentId)
 
-// Get customer profile
-const { user: profile } = await store.auth.getProfile()
-
-// Wishlist (requires auth)
-await store.wishlist.add('product-uuid')
-const { wishlist } = await store.wishlist.list()
-
-// Checkout with PayPal
-const { approveUrl } = await store.payments.createPayPalOrder({
-  items: [
-    { name: 'Blue Sapphire', unitAmount: 299.99, quantity: 1 }
-  ],
-  currency: 'CAD',
-  successUrl: `${window.location.origin}/checkout/success`,
-  cancelUrl: `${window.location.origin}/cart`,
-})
-window.location.href = approveUrl
-
-// Validate discount
-const { discount } = await store.discounts.validate('SAVE10', 199.99)
-console.log(`You save $${discount.discountAmount}`)
-
-// Get shipping rates
-const { rates } = await store.shipping.getRates({
-  country: 'US',
-  state: 'CA',
-  subtotal: 299.99
-})
+// ── After the sale ───────────────────────────────────────────────────────────
+const { orders } = await store.orders.list()          // the session decides whose
+const { conversation } = await store.messages.start('Where is my order?', 'Hi…')
 */

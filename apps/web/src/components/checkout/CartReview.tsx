@@ -1,10 +1,10 @@
 'use client';
-import { useGemPouch } from '@/contexts/GemPouchContext';
-import { useCurrency } from '@/contexts/CurrencyContext';
-import { toast } from 'sonner';
-import { IconTrash, IconCheck, IconX } from '@tabler/icons-react';
+import { IconCheck, IconTrash, IconX } from '@tabler/icons-react';
 import Image from 'next/image';
 import Link from 'next/link';
+import { toast } from 'sonner';
+import { useCurrency } from '@/contexts/CurrencyContext';
+import { useGemPouch } from '@/contexts/GemPouchContext';
 
 interface CartReviewProps {
   items: Array<{
@@ -18,15 +18,16 @@ interface CartReviewProps {
   onContinue: () => void;
   discountCode: string;
   setDiscountCode: (code: string) => void;
+  /**
+   * What QuickDash confirmed the code is worth, and nothing else.
+   *
+   * The rule behind it — percentage or fixed, its cap, its minimum, whether it
+   * waives delivery — stays in QuickDash. Re-stating it here only created a
+   * second version of the truth that could disagree with the charge.
+   */
   appliedDiscount: {
     code: string;
-    type: 'percentage' | 'fixed_amount' | 'fixed';
-    value: number;
-    amount: number;
-    free_shipping: boolean;
-    isReferral?: boolean;
-    referrerName?: string;
-    description?: string;
+    amountCents: number;
   } | null;
   discountError: string;
   validateDiscountCode: () => void;
@@ -47,7 +48,7 @@ export default function CartReview({
   const { formatPrice } = useCurrency();
 
   const handleQuantityDecrease = (itemId: string, currentQuantity: number, itemName: string) => {
-    const item = items.find(i => i.id === itemId);
+    const item = items.find((i) => i.id === itemId);
     if (!item) return;
 
     const previousQuantity = currentQuantity;
@@ -91,7 +92,7 @@ export default function CartReview({
   };
 
   const handleDirectRemoval = (itemId: string, itemName: string) => {
-    const item = items.find(i => i.id === itemId);
+    const item = items.find((i) => i.id === itemId);
     if (item) {
       const removedItem = { ...item };
       removeItem(itemId);
@@ -109,20 +110,23 @@ export default function CartReview({
 
   const subtotal = items.reduce((sum, item) => sum + item.price * item.quantity, 0);
   const totalItemCount = items.reduce((sum, item) => sum + item.quantity, 0);
-  const discount = appliedDiscount?.amount || 0;
+  const discount = (appliedDiscount?.amountCents ?? 0) / 100;
   const subtotalAfterDiscount = subtotal - discount;
 
   return (
     <div>
       {/* Products Grid - 2 columns on mobile, 4 on desktop */}
       <div className="grid grid-cols-2 gap-3 xs:gap-4 md:grid-cols-3 md:gap-5 lg:grid-cols-4 lg:gap-6">
-        {items.map(item => (
+        {items.map((item) => (
           <div
             key={item.id}
             className="group flex flex-col overflow-hidden rounded-xl border border-white/10 bg-white/5 transition-all duration-300 hover:border-white/20 hover:bg-white/10 xs:rounded-2xl"
           >
             {/* Product Image */}
-            <Link href={`/product/${item.id}`} className="relative aspect-square overflow-hidden bg-neutral-900">
+            <Link
+              href={`/product/${item.id}`}
+              className="relative aspect-square overflow-hidden bg-neutral-900"
+            >
               {/* Remove Button - Top Right */}
               <button
                 onClick={(e) => {
@@ -236,40 +240,19 @@ export default function CartReview({
           Have a discount or referral code?
         </p>
         {appliedDiscount ? (
-          <div className={`flex items-center justify-between rounded-lg p-3 ${
-            appliedDiscount.isReferral
-              ? 'bg-purple-500/10'
-              : 'bg-green-500/10'
-          }`}>
+          <div className="flex items-center justify-between rounded-lg bg-green-500/10 p-3">
             <div className="flex items-center gap-2">
-              <IconCheck size={18} className={appliedDiscount.isReferral ? 'text-purple-400' : 'text-green-400'} />
+              <IconCheck size={18} className="text-green-400" />
               <div>
-                <p className={`text-sm font-medium ${appliedDiscount.isReferral ? 'text-purple-300' : 'text-green-300'}`}>
-                  {appliedDiscount.isReferral ? (
-                    <>Referral from {appliedDiscount.referrerName || 'a friend'}</>
-                  ) : (
-                    <>"{appliedDiscount.code}" applied</>
-                  )}
+                <p className="text-sm font-medium text-green-300">
+                  &quot;{appliedDiscount.code}&quot; applied
                 </p>
-                <p className={`text-xs ${appliedDiscount.isReferral ? 'text-purple-400/70' : 'text-green-400/70'}`}>
-                  {appliedDiscount.description || (
-                    <>
-                      {appliedDiscount.type === 'percentage'
-                        ? `${appliedDiscount.value}% off`
-                        : `${formatPrice(appliedDiscount.value)} off`}
-                      {appliedDiscount.free_shipping && ' + Free shipping'}
-                    </>
-                  )}
-                </p>
+                <p className="text-xs text-green-400/70">{formatPrice(discount)} off</p>
               </div>
             </div>
             <button
               onClick={removeDiscount}
-              className={`p-1.5 transition-colors ${
-                appliedDiscount.isReferral
-                  ? 'text-purple-400 hover:text-purple-300'
-                  : 'text-green-400 hover:text-green-300'
-              }`}
+              className="p-1.5 text-green-400 transition-colors hover:text-green-300"
             >
               <IconX size={16} />
             </button>
@@ -280,10 +263,10 @@ export default function CartReview({
               <input
                 type="text"
                 value={discountCode}
-                onChange={e => setDiscountCode(e.target.value)}
+                onChange={(e) => setDiscountCode(e.target.value)}
                 placeholder="Enter code"
                 className="h-10 flex-1 rounded-l-lg border border-r-0 border-white/10 bg-white/5 px-4 font-[family-name:var(--font-inter)] text-sm text-white placeholder-white/40 transition-colors focus:border-white/20 focus:outline-none xs:h-11"
-                onKeyDown={e => e.key === 'Enter' && validateDiscountCode()}
+                onKeyDown={(e) => e.key === 'Enter' && validateDiscountCode()}
               />
               <button
                 onClick={validateDiscountCode}
