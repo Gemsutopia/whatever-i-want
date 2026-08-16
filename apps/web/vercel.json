@@ -1,5 +1,8 @@
 {
-  "installCommand": "pnpm install",
+  "framework": "nextjs",
+  "installCommand": "cd ../.. && pnpm install",
+  "buildCommand": "cd ../.. && pnpm build:web",
+  "outputDirectory": ".next",
   "crons": [
     {
       "path": "/api/cron/end-auctions",
