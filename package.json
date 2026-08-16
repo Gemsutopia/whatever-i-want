@@ -34,7 +34,7 @@
     "@biomejs/biome": "^2.5.4",
     "@neondatabase/serverless": "^1.0.2",
     "@playwright/test": "^1.61.1",
-    "@types/node": "^25.0.6",
+    "@types/node": "^26.2.0",
     "drizzle-kit": "^0.31.8",
     "drizzle-orm": "^0.45.2",
     "husky": "^9.1.7",
